@@ -3,6 +3,7 @@
 // Build/run: tools/preview/run.sh
 #include <Arduino.h>
 #include "../../src/audio.h"
+#include "../../src/battery.h"
 #include "../../src/devices.h"
 #include "../../src/display.h"
 #include "../../src/led.h"
@@ -15,7 +16,8 @@ static uint32_t g_ms = 0;
 uint32_t millis() { return g_ms; }
 void delay(uint32_t ms) { g_ms += ms; }
 uint32_t esp_random() { return (uint32_t)rand() * 2654435761u; }
-uint32_t analogReadMilliVolts(int) { return 1950; }
+static uint32_t g_batMv = 1960;  // ADC pin mV (cell = 2x)
+uint32_t analogReadMilliVolts(int) { return g_batMv; }
 
 // ---- stubs for hardware modules ----
 static const char* g_shot = nullptr;
@@ -176,6 +178,7 @@ static void populate(int t) {
 
 static void tick(int frames, touch::State t = {}) {
   for (int i = 0; i < frames; i++) {
+    battery::update();
     radio::wp += 9;
     radio::bp += 3;
     for (int c = 1; c <= 13; c++) {
@@ -270,6 +273,23 @@ int main(int argc, char** argv) {
   tap(440, 43);  // RF scope
   tick(80);
   snprintf(p, sizeof p, "%s/07_spectrum.ppm", out);
+  shot(p);
+  tap(30, 14);
+
+  // Battery draining into the low warning
+  for (int mv = 1960; mv >= 1785; mv -= 5) {
+    g_batMv = mv;
+    tick(25);
+  }
+  snprintf(p, sizeof p, "%s/08_battery_low.ppm", out);
+  shot(p);
+  // Plug in: step up by ~60 mV at the cell, then a slow climb
+  g_batMv += 30;
+  for (int i = 0; i < 20; i++) {
+    g_batMv += 1;
+    tick(25);
+  }
+  snprintf(p, sizeof p, "%s/09_battery_charging.ppm", out);
   shot(p);
   return 0;
 }

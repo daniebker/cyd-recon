@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "audio.h"
+#include "battery.h"
 #include "config.h"
 #include "devices.h"
 #include "display.h"
@@ -29,6 +30,7 @@ void setup() {
   Serial.println("\n" FW_NAME " v" FW_VERSION);
 
   pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
+  battery::begin();
   led::begin();
 
   if (!display::begin()) {
@@ -78,6 +80,7 @@ void loop() {
   }
 
   led::update();
+  battery::update();
 
   if (now - s_lastFrame >= 1000 / TARGET_FPS) {
     s_lastFrame = now;

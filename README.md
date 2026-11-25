@@ -34,6 +34,11 @@ Passive radio recon firmware for the **Freenove ESP32-S3 Display 3.5"** (FNK0104
   - WiFi targets automatically lock the sniffer to the target's channel for fast updates
   - all decoded details: vendor, MAC (randomised or not), channel and security, probe requests, raw BLE advertisement hex, match reason, and Remote ID coordinates
 - **RF scope:** packets per second for each 2.4 GHz channel, strongest RSSI per channel, and a waterfall. Tap a channel to park on it.
+- **Battery gauge** on every screen:
+  - The cell icon shows 4 segments plus a percentage, mapped from a LiPo discharge curve rather than a straight line.
+  - It shows a bolt while charging, `FULL` at the charge ceiling, and `USB PWR` when no cell is fitted.
+  - You get a one-off banner, chirp and LED flash at 15% and again at 5%.
+  - The live voltage appears in the bottom status ticker.
 - Alerts are also printed over USB serial as CSV: `[ALERT] category,label,mac,rssi,reason`.
 
 ## Build and flash

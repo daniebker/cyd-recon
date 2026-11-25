@@ -17,7 +17,7 @@ for s in $SRCS; do
   [ -f "$o" ] || { case "$s" in *.c) gcc -O1 -w -DLGFX_LINUX_FB -I$LGFX -c "$s" -o "$o";; *) g++ $FLAGS -c "$s" -o "$o";; esac; }
   objs+=("$o")
 done
-g++ $FLAGS "$HERE/preview.cpp" "$ROOT/src/ui.cpp" "$ROOT/src/devices.cpp" "$ROOT/src/signatures.cpp" \
+g++ $FLAGS "$HERE/preview.cpp" "$ROOT/src/ui.cpp" "$ROOT/src/devices.cpp" "$ROOT/src/signatures.cpp" "$ROOT/src/battery.cpp" \
   "${objs[@]}" -o "$BUILD/preview" -lpthread
 "$BUILD/preview" "$OUT"
 python3 - "$OUT" <<'PY'

@@ -2,6 +2,7 @@
 #include <LovyanGFX.hpp>
 #include <math.h>
 #include "audio.h"
+#include "battery.h"
 #include "config.h"
 #include "devices.h"
 #include "display.h"
@@ -184,16 +185,76 @@ void background() {
   for (int y = 0; y < SCREEN_H; y += 3) g.drawFastHLine(0, y, SCREEN_W, SCAN);
 }
 
-int batteryPct() {
-  static int pct = -1;
-  static uint32_t last = 0;
-  if (pct < 0 || millis() - last > 5000) {
-    last = millis();
-    const float v = analogReadMilliVolts(PIN_BAT_ADC) * 2.0f / 1000.0f;
-    pct = constrain((int)((v - 3.3f) / (4.15f - 3.3f) * 100), 0, 100);
-    if (v > 4.5f || v < 2.5f) pct = 101;  // no battery / USB only
+// Battery widget: 4-segment cell icon with % underneath (fits the 28px header)
+void drawBattery(int x) {
+  const int pct = battery::percent();
+  const auto st = battery::state();
+  const uint32_t now = millis();
+  const int w = 28, h = 13, y = 2;
+  uint16_t col = GREEN;
+  if (pct >= 0 && pct <= 15) col = RED;
+  else if (pct >= 0 && pct <= 35) col = YELLOW;
+  if (st == battery::BAT_CHARGING || st == battery::BAT_FULL) col = CYAN;
+  const bool blinkOff = battery::low() && ((now / 400) & 1);
+
+  g.drawRect(x, y, w, h, blinkOff ? RED : TEXT);
+  g.fillRect(x + w, y + 4, 2, h - 8, blinkOff ? RED : TEXT);
+  char buf[8];
+  if (st == battery::BAT_ABSENT) {
+    text("USB", x + w / 2, y + h / 2 + 1, CYAN, &fonts::Font0, textdatum_t::middle_center);
+    text("PWR", x + w / 2, y + h + 2, DIM, &fonts::Font0, textdatum_t::top_center);
+    return;
   }
-  return pct;
+  if (pct < 0) {
+    text("..", x + w / 2, y + h / 2, DIM, &fonts::Font0, textdatum_t::middle_center);
+    return;
+  }
+  // Segments; while charging, animate them filling up
+  int segs = (pct + 24) / 25;
+  if (st == battery::BAT_CHARGING) segs = max(segs - 1, 0) + (int)((now / 450) % (5 - max(segs - 1, 0)));
+  segs = constrain(segs, (pct > 0) ? 1 : 0, 4);
+  for (int i = 0; i < 4; i++) {
+    if (i < segs && !blinkOff) g.fillRect(x + 2 + i * 6, y + 2, 5, h - 4, col);
+  }
+  if (st == battery::BAT_CHARGING) {
+    // lightning bolt
+    const int cx = x + w / 2, cy = y + h / 2;
+    g.fillTriangle(cx + 2, cy - 6, cx - 4, cy + 1, cx, cy + 1, BLACK);
+    g.fillTriangle(cx, cy - 1, cx + 4, cy - 1, cx - 2, cy + 6, BLACK);
+    g.drawLine(cx + 2, cy - 5, cx - 3, cy, YELLOW);
+    g.drawLine(cx - 3, cy, cx + 3, cy, YELLOW);
+    g.drawLine(cx + 3, cy, cx - 1, cy + 5, YELLOW);
+  }
+  snprintf(buf, sizeof(buf), "%d%%", pct);
+  text(st == battery::BAT_FULL ? "FULL" : buf, x + w / 2, y + h + 2, blinkOff ? RED : col, &fonts::Font0,
+       textdatum_t::top_center);
+}
+
+// Low battery banner (shown once at 15 % and again at 5 %)
+uint32_t s_batWarnUntil = 0;
+int s_batWarnLevel = 0;
+void checkBatteryWarning() {
+  const int lvl = battery::critical() ? 2 : battery::low() ? 1 : 0;
+  if (lvl > s_batWarnLevel) {
+    s_batWarnUntil = millis() + 5000;
+    audio::alert();
+    led::flash(RED);
+    logEvent("!! battery %s %d%% (%.2fV)", lvl == 2 ? "CRITICAL" : "low", battery::percent(), battery::volts());
+  }
+  // Re-arm once charged back up
+  if (lvl < s_batWarnLevel && battery::percent() > 25) s_batWarnLevel = lvl;
+  else s_batWarnLevel = max(s_batWarnLevel, lvl);
+}
+void drawBatteryWarning() {
+  if (millis() > s_batWarnUntil) return;
+  const bool crit = battery::critical();
+  const bool blink = (millis() / 250) & 1;
+  const int x = 90, y = 250, w = 300, h = 36;
+  g.fillRect(x + 3, y + 3, w, h, BLACK);
+  cutRect(x, y, w, h, blink ? RED : ORANGE, true, BG2);
+  char buf[48];
+  snprintf(buf, sizeof(buf), "!! %s BATTERY  %d%%  %.2fV", crit ? "CRITICAL" : "LOW", battery::percent(), battery::volts());
+  neonText(buf, x + w / 2, y + h / 2, crit ? RED : ORANGE, &fonts::Font2, textdatum_t::middle_center, 1);
 }
 
 void header(const char* title) {
@@ -207,14 +268,7 @@ void header(const char* title) {
   }
   // Right status block
   char buf[40];
-  const int bat = batteryPct();
-  if (bat > 100) snprintf(buf, sizeof(buf), "USB");
-  else snprintf(buf, sizeof(buf), "%d%%", bat);
-  const int bx = 444;
-  g.drawRect(bx, 6, 26, 12, DIM);
-  g.fillRect(bx + 26, 9, 3, 6, DIM);
-  if (bat <= 100) g.fillRect(bx + 2, 8, max(1, 22 * bat / 100), 8, bat < 20 ? RED : GREEN);
-  else text("USB", bx + 13, 12, CYAN, &fonts::Font0, textdatum_t::middle_center);
+  drawBattery(446);
 
   const int nf = devices::countFlagged();
   snprintf(buf, sizeof(buf), "WIFI %03d  BLE %03d", devices::countMedium(MED_WIFI_AP), devices::countMedium(MED_BLE));
@@ -239,8 +293,8 @@ void footerTicker() {
   const uint32_t up = millis() / 1000;
   const int idx = (s_frameNo / (TARGET_FPS * 3)) % 2;
   if (idx == 0) {
-    snprintf(buf, sizeof(buf), "> wifi %4.0f pkt/s  ble %3.0f adv/s  devs %d  heap %uk  up %02lu:%02lu:%02lu",
-             s_wifiPps, s_blePps, devices::count(), (unsigned)(ESP.getFreeHeap() / 1024), (unsigned long)(up / 3600),
+    snprintf(buf, sizeof(buf), "> wifi %4.0f pkt/s  ble %3.0f adv/s  devs %d  bat %.2fV  up %02lu:%02lu:%02lu",
+             s_wifiPps, s_blePps, devices::count(), battery::volts(), (unsigned long)(up / 3600),
              (unsigned long)(up / 60 % 60), (unsigned long)(up % 60));
   } else {
     const char* last = s_log[(s_logHead + 5) % 6];
@@ -554,11 +608,12 @@ void drawDetail() {
   neonText(title, 84, 6, c, &fonts::Font2, textdatum_t::top_left, 1);
   const bool blink = (now / 500) & 1;
   if (live) {
-    g.fillCircle(386, 14, 4, blink ? RED : MAGENTA_DIM);
-    text("TRACKING", 396, 10, RED, &fonts::Font0);
+    g.fillCircle(356, 14, 4, blink ? RED : MAGENTA_DIM);
+    text("TRACKING", 366, 10, RED, &fonts::Font0);
   } else {
-    text("NO SIGNAL", 396, 10, DIM, &fonts::Font0);
+    text("NO SIGNAL", 366, 10, DIM, &fonts::Font0);
   }
+  drawBattery(446);
   g.drawFastHLine(0, 28, SCREEN_W, c);
   g.drawFastHLine(0, 29, SCREEN_W, lerp565(BG, c, 0.4f));
 
@@ -660,7 +715,8 @@ void drawSpectrum() {
   neonText("RF SCOPE // 2.4GHz", 84, 6, GREEN, &fonts::Font2, textdatum_t::top_left, 1);
   char buf[48];
   snprintf(buf, sizeof(buf), "WIFI %.0f/s  BLE %.0f/s", s_wifiPps, s_blePps);
-  text(buf, 474, 10, TEXT, &fonts::Font0, textdatum_t::top_right);
+  text(buf, 436, 10, TEXT, &fonts::Font0, textdatum_t::top_right);
+  drawBattery(446);
   g.drawFastHLine(0, 28, SCREEN_W, GREEN);
   g.drawFastHLine(0, 29, SCREEN_W, GREEN_DIM);
 
@@ -935,6 +991,7 @@ void frame(const touch::State& t, bool backButton) {
     led::flash(devices::categoryColor(d.category));
   }
 
+  checkBatteryWarning();
   handleTouch(t);
   s_nhits = 0;
   background();
@@ -952,6 +1009,7 @@ void frame(const touch::State& t, bool backButton) {
       break;
   }
   if (s_screen != SCR_DETAIL) drawToast();
+  drawBatteryWarning();
   glitchPass();
   display::pushFrame((const uint16_t*)g.getBuffer());
 }
