@@ -263,6 +263,160 @@ void doPortScan(int idx) {
   h.portScan = 2;
 }
 
+// ---------------- SSH posture audit ----------------
+// Connect to :22, read the version banner, then parse the server's unencrypted
+// SSH_MSG_KEXINIT to see which key-exchange, host-key, cipher and MAC
+// algorithms it offers, and flag legacy/weak ones. This is the same
+// information `ssh-audit` reports; it never sends a username or password and
+// never attempts to authenticate.
+volatile int s_sshReq = -1;
+
+// Read exactly n bytes (or until the deadline) into buf. Returns bytes read.
+int sshRead(NetworkClient& c, uint8_t* buf, int n, uint32_t deadline) {
+  int got = 0;
+  while (got < n && (int32_t)(deadline - millis()) > 0 && c.connected()) {
+    const int a = c.available();
+    if (a > 0) {
+      got += c.read(buf + got, min(a, n - got));
+    } else {
+      delay(5);
+    }
+  }
+  return got;
+}
+
+// Pull name list index `want` (0-based) out of a KEXINIT payload into out.
+bool kexNameList(const uint8_t* p, int len, int want, char* out, size_t cap) {
+  int off = 17;  // skip msg type (1) + cookie (16)
+  for (int i = 0; i <= want; i++) {
+    if (off + 4 > len) return false;
+    const uint32_t l = ((uint32_t)p[off] << 24) | (p[off + 1] << 16) | (p[off + 2] << 8) | p[off + 3];
+    off += 4;
+    if (off + (int)l > len) return false;
+    if (i == want) {
+      const size_t n = min((size_t)l, cap - 1);
+      memcpy(out, p + off, n);
+      out[n] = 0;
+      return true;
+    }
+    off += l;
+  }
+  return false;
+}
+
+bool hasAny(const char* hay, const char* const* needles) {
+  for (int i = 0; needles[i]; i++)
+    if (strstr(hay, needles[i])) return true;
+  return false;
+}
+
+void doSshAudit(int idx) {
+  net::Host& h = s_hosts[idx];
+  if (!h.used) return;
+  h.sshState = 1;
+  h.sshRisk = 0;
+  h.sshBanner[0] = 0;
+  h.sshWarn[0] = 0;
+  const uint32_t epoch = s_epoch;
+
+  NetworkClient c;
+  if (!c.connect(IPAddress(h.ip), 22, 1200)) {
+    strlcpy(h.sshWarn, "port 22 closed or filtered", sizeof(h.sshWarn));
+    h.sshState = 3;
+    return;
+  }
+  c.setTimeout(1);
+  const uint32_t deadline = millis() + 4000;
+
+  // Both sides send an ID string; send ours so servers that wait for it proceed.
+  c.print("SSH-2.0-CYDRECON_" FW_VERSION "\r\n");
+
+  // Read the server ID line (skip any pre-banner text lines not starting SSH-)
+  char line[72];
+  bool gotId = false;
+  for (int tries = 0; tries < 6 && !gotId; tries++) {
+    int n = 0;
+    while (n < (int)sizeof(line) - 1 && (int32_t)(deadline - millis()) > 0) {
+      uint8_t ch;
+      if (sshRead(c, &ch, 1, deadline) != 1) break;
+      if (ch == '\n') break;
+      if (ch != '\r') line[n++] = ch;
+    }
+    line[n] = 0;
+    if (strncmp(line, "SSH-", 4) == 0) gotId = true;
+  }
+  if (epoch != s_epoch) { c.stop(); return; }
+  if (!gotId) {
+    strlcpy(h.sshWarn, "no SSH banner (not an SSH server?)", sizeof(h.sshWarn));
+    h.sshState = 3;
+    c.stop();
+    return;
+  }
+  // "SSH-2.0-OpenSSH_8.9p1 Debian" -> keep the software token
+  const char* soft = line + 4;
+  while (*soft && *soft != '-') soft++;      // past "2.0"
+  if (*soft == '-') soft++;
+  strlcpy(h.sshBanner, soft, sizeof(h.sshBanner));
+  for (char* s = h.sshBanner; *s; s++)
+    if (*s == ' ') { *s = 0; break; }        // drop trailing comment
+
+  // Read the server's KEXINIT packet (unencrypted at this stage)
+  uint8_t hdr[5];
+  static uint8_t payload[1024];
+  bool parsed = false;
+  char kex[192] = "", hkey[96] = "", enc[192] = "", mac[160] = "";
+  if (sshRead(c, hdr, 5, deadline) == 5) {
+    const uint32_t plen = ((uint32_t)hdr[0] << 24) | (hdr[1] << 16) | (hdr[2] << 8) | hdr[3];
+    const uint8_t pad = hdr[4];
+    if (plen >= 2 && plen < 35000) {
+      const int bodyLen = (int)plen - 1;                 // payload + padding still on the wire
+      const int want = min(bodyLen, (int)sizeof(payload));
+      const int got = sshRead(c, payload, want, deadline);
+      const int payLen = got - pad;                      // strip trailing padding
+      if (got >= 17 && payload[0] == 20 && payLen > 17) {
+        kexNameList(payload, payLen, 0, kex, sizeof(kex));
+        kexNameList(payload, payLen, 1, hkey, sizeof(hkey));
+        kexNameList(payload, payLen, 3, enc, sizeof(enc));   // ciphers server->client
+        kexNameList(payload, payLen, 5, mac, sizeof(mac));   // MACs server->client
+        parsed = true;
+      }
+    }
+  }
+  c.stop();
+  if (epoch != s_epoch) return;
+
+  if (!parsed) {
+    // Banner alone is still useful; just couldn't audit algorithms
+    strlcpy(h.sshWarn, "banner only (no algorithm list)", sizeof(h.sshWarn));
+    h.sshState = 2;
+    Serial.printf("[ssh] %u.%u.%u.%u %s (banner only)\n", h.ip & 0xFF, (h.ip >> 8) & 0xFF, (h.ip >> 16) & 0xFF,
+                  h.ip >> 24, h.sshBanner);
+    return;
+  }
+
+  static const char* kWeakKex[] = {"group1-", "group-exchange-sha1", "group14-sha1", "sha1", "rsa1024", nullptr};
+  static const char* kWeakKey[] = {"ssh-rsa", "ssh-dss", nullptr};
+  static const char* kWeakEnc[] = {"cbc", "arcfour", "3des", "des-cbc", "none,", nullptr};
+  static const char* kWeakMac[] = {"hmac-md5", "hmac-sha1,", "hmac-sha1-96", "-96", "umac-64", nullptr};
+
+  char* w = h.sshWarn;
+  size_t cap = sizeof(h.sshWarn);
+  auto add = [&](const char* tag) {
+    const size_t n = strlen(w);
+    snprintf(w + n, cap - n, "%s%s", n ? ", " : "weak: ", tag);
+  };
+  if (hasAny(hkey, kWeakKey)) add("hostkey");
+  if (hasAny(kex, kWeakKex)) add("kex");
+  if (hasAny(enc, kWeakEnc)) add("cipher");
+  if (hasAny(mac, kWeakMac)) add("mac");
+
+  h.sshRisk = w[0] ? 2 : 0;
+  if (!w[0]) strlcpy(h.sshWarn, "modern algorithms only", cap);
+  h.sshState = 2;
+  Serial.printf("[ssh] %u.%u.%u.%u %s -> %s\n", h.ip & 0xFF, (h.ip >> 8) & 0xFF, (h.ip >> 16) & 0xFF, h.ip >> 24,
+                h.sshBanner, h.sshWarn);
+}
+
 // ---------------- mDNS ----------------
 const char* kServices[][2] = {
     {"http", "http"},       {"workstation", "pc"}, {"googlecast", "cast"}, {"airplay", "airplay"},
@@ -552,6 +706,13 @@ void discoveryTask(void*) {
       continue;
     }
 
+    if (s_sshReq >= 0) {
+      const int r = s_sshReq;
+      s_sshReq = -1;
+      doSshAudit(r);
+      continue;
+    }
+
     if (!sweepIp && (s_rescanReq || !lastSweep || now - lastSweep > 90000)) {
       s_rescanReq = false;
       lastSweep = now;
@@ -667,6 +828,7 @@ void update() {
         radio::setPromiscuous(true);  // keep sniffing, on the AP's channel
         if (s_pendSave) remember(s_info.ssid, s_pendPass);
         if (!s_mdnsUp) s_mdnsUp = MDNS.begin("cyd-recon");
+        configTime(0, 0, "pool.ntp.org", "time.google.com");  // real timestamps for .pcap captures
         snprintf(s_status, sizeof(s_status), "linked: %s", s_info.ssid);
         break;
       }
@@ -766,6 +928,13 @@ void probePorts(int idx) {
   if (idx >= 0 && idx < MAX_HOSTS && s_hosts[idx].used) {
     s_hosts[idx].portScan = 1;
     s_portReq = idx;
+  }
+}
+
+void probeSsh(int idx) {
+  if (idx >= 0 && idx < MAX_HOSTS && s_hosts[idx].used) {
+    s_hosts[idx].sshState = 1;
+    s_sshReq = idx;
   }
 }
 

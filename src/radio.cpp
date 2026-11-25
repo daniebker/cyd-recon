@@ -1,6 +1,7 @@
 #include "radio.h"
 #include <NimBLEDevice.h>
 #include <WiFi.h>
+#include "capture.h"
 #include "esp_wifi.h"
 
 namespace {
@@ -139,6 +140,7 @@ void wifiRx(void* buf, wifi_promiscuous_pkt_type_t type) {
   const uint8_t* f = pkt->payload;
   const uint8_t ch = pkt->rx_ctrl.channel;
   const int8_t rssi = pkt->rx_ctrl.rssi;
+  if (pkt->rx_ctrl.rx_state == 0) capture::onWifiFrame(f, len, ch, rssi);  // no-op unless recording
   s_wifiPkts = s_wifiPkts + 1;
   if (ch >= 1 && ch <= WIFI_MAX_CH) {
     s_ch[ch].packets = s_ch[ch].packets + 1;

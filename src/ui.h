@@ -13,8 +13,10 @@ void bootDone();
 void onNewDevice(int idx);
 // Device slot currently being tracked (-1 if none)
 int trackedIndex();
-// Touch diagnostics screen (also opened by holding BOOT for 1 s)
+// Touch diagnostics screen (also reachable from Settings)
 void openTouchTest();
+// Full-screen "powering off" splash, shown just before deep sleep
+void showPowerOff();
 // Render + handle input; call every loop
 void frame(const touch::State& t, bool backButton);
 

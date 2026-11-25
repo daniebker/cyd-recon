@@ -41,6 +41,11 @@ struct Host {
   uint16_t ports[MAX_PORTS];
   uint8_t nPorts;
   uint8_t portScan;    // 0 never, 1 running, 2 done
+  // SSH posture (CHECK SSH): passive banner + KEXINIT algorithm audit, no login attempt
+  uint8_t sshState;    // 0 never, 1 running, 2 done, 3 no ssh / unreachable
+  uint8_t sshRisk;     // 0 modern, 1 caution, 2 weak/legacy
+  char sshBanner[40];  // server version string, e.g. "OpenSSH_8.9p1"
+  char sshWarn[72];    // findings, e.g. "weak: ssh-rsa hostkey, cbc cipher"
 };
 
 void begin();
@@ -64,6 +69,7 @@ const Host& host(int i);
 void rescan();
 int sweepProgress();   // 0..100, 100 = idle
 void probePorts(int hostIdx);
+void probeSsh(int hostIdx);   // passive SSH config audit of host:22 (no credentials tried)
 const char* portName(uint16_t port);
 const char* nameSrcText(uint8_t src);  // "mdns", "dns", "netbios", ...
 

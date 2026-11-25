@@ -37,6 +37,14 @@
 #define ES8311_ADDR     0x18
 #define AUDIO_RATE      16000
 
+// ---- microSD (SDMMC 4-bit), used for .pcap capture ----
+#define PIN_SD_CMD       4
+#define PIN_SD_CLK       5
+#define PIN_SD_D0        6
+#define PIN_SD_D1        7
+#define PIN_SD_D2        2
+#define PIN_SD_D3        3
+
 // ---- Misc ----
 #define PIN_WS2812     40   // single WS2812
 #define PIN_BAT_ADC      8   // 1:2 divider

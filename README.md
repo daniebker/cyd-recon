@@ -9,8 +9,8 @@ Passive radio recon firmware for the **Freenove ESP32-S3 Display 3.5"** (FNK0104
 | ![tracker](docs/img/05_track_wifi.png) | ![scope](docs/img/07_spectrum.png) |
 | **Network: devices on your LAN** | **Host detail + port probe** |
 | ![lan](docs/img/13_net_linked.png) | ![host](docs/img/14_host.png) |
-| **Settings** | |
-| ![settings](docs/img/16_settings.png) | |
+| **Settings** | **Packet capture** |
+| ![settings](docs/img/16_settings.png) | ![capture](docs/img/17_capture.png) |
 
 *(Screenshots rendered by `tools/preview` with simulated devices.)*
 
@@ -47,13 +47,18 @@ Passive radio recon firmware for the **Freenove ESP32-S3 Display 3.5"** (FNK0104
   - **Joining:** pick a network the sniffer has heard, or type a hidden SSID. Enter the password on the on-screen keyboard (SHIFT / #+= / SHOW). Up to 6 networks are saved, and AUTO-JOIN connects to the strongest saved one at boot.
   - **Link stats:** SSID, BSSID, signal, channel, uptime, gateway ping, IP, mask, gateway, DNS and your MAC.
   - **Connected devices:** found by an ARP sweep of your /24 and named via mDNS (hostname plus services such as cast, airplay, printer, ssh, homekit). Vendors come from MAC OUIs. Wireless clients the sniffer hears talking to your access point are merged in with their live signal strength, so devices that ignore ARP still show up.
-  - **Host detail:** role, IP, MAC, vendor, name, services and when it was last seen. Includes the over-the-air signal and fingerprint if the sniffer has heard it (e.g. a GoPro on your WiFi). **PROBE PORTS** checks 17 common TCP ports (ssh, http, rtsp, smb, printer, cast...), and **TRACK RF SIGNAL** jumps into the hot/cold tracker to physically find it.
+  - **Host detail:** role, IP, MAC, vendor, name, services and when it was last seen. Includes the over-the-air signal and fingerprint if the sniffer has heard it (e.g. a GoPro on your WiFi). **PROBE PORTS** checks 17 common TCP ports (ssh, http, rtsp, smb, printer, cast...), and **TRACK RF SIGNAL** jumps into the hot/cold tracker to physically find it. When port 22 is open, **CHECK SSH** reports the SSH version and audits the offered key-exchange, host-key, cipher and MAC algorithms, flagging weak/legacy ones. It is passive: it reads the banner and algorithm negotiation only, and never sends a username, password or any login attempt.
   - **Channel:** while joined, the sniffer stays on your access point's channel, because hopping would drop the link. BLE keeps scanning normally.
 - **Settings** (the gear button next to the filter tabs). Changes apply immediately and are saved to flash, so they survive a reboot:
   - **Audio:** master sound on/off, a volume slider (drag it or use -/+; it beeps at the new level), touch clicks, and the tracker's Geiger ticker.
   - **Alerts:** turn the new-threat chirp, pop-up banner and LED flash on or off separately, and switch the low-battery banner off.
   - **Display + LED:** backlight brightness, and the status LED's idle glow and tracker heat.
   - **TEST ALERT** fires a chirp and LED flash with your current settings. **RESET DEFAULTS** puts everything back.
+- **Packet capture** (RF SCOPE screen, **REC PCAP**). Saves WiFi frames to a FAT32 microSD card as `/pcap/cap_NNNN.pcap`, which opens directly in Wireshark (802.11 with a radiotap header giving the channel and signal strength):
+  - It records management and data frames on whatever channel the radio is on, so it follows hopping. Lock a channel (tap its bar) to record one network's traffic, and while you're joined to a network it records that access point's channel. Control frames and BLE are not recorded. Data frames on encrypted networks stay encrypted.
+  - While recording, a REC badge blinks in the header and RF SCOPE shows the file, packet count, size, elapsed time and any dropped frames. Files roll over every 100 MB.
+  - Timestamps are real dates if the board has joined a network since boot (time is set over NTP), otherwise they count from boot.
+- **Power:** a press of the **BOOT** button puts the device into deep sleep (radios, display and any capture shut down cleanly); the next BOOT press wakes it with a fresh boot. The touch-test diagnostics screen is reached from **Settings**.
 - Alerts are also printed over USB serial as CSV: `[ALERT] category,label,mac,rssi,reason`.
 
 ## Build and flash

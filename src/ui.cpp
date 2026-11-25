@@ -4,6 +4,7 @@
 #include <algorithm>
 #include "audio.h"
 #include "battery.h"
+#include "capture.h"
 #include "config.h"
 #include "devices.h"
 #include "display.h"
@@ -66,6 +67,9 @@ enum HitId : uint8_t {
   H_STEP,
   H_TESTALERT,
   H_RESETCFG,
+  H_REC,
+  H_SSHCHECK,
+  H_TOUCHTEST,
 };
 struct Hit {
   int16_t x, y, w, h;
@@ -337,6 +341,11 @@ void header(const char* title) {
   if (radio::hopping()) snprintf(buf, sizeof(buf), "CH%02d HOP", radio::channel());
   else snprintf(buf, sizeof(buf), radio::stationChannel() ? "CH%02d LINK" : "CH%02d LOCK", radio::channel());
   text(buf, 436, 15, radio::hopping() ? DIM : YELLOW, &fonts::Font0, textdatum_t::top_right);
+  if (capture::active()) {
+    const bool on = (millis() / 500) & 1;
+    g.fillCircle(296, 7, 3, on ? RED : DARK);
+    text("REC", 330, 4, RED, &fonts::Font0, textdatum_t::top_right);
+  }
   snprintf(buf, sizeof(buf), "ALERT %02d", nf);
   const bool blink = nf && ((millis() / 400) & 1);
   text(buf, 330, 15, nf ? (blink ? RED : MAGENTA) : DIM, &fonts::Font0, textdatum_t::top_right);
@@ -780,7 +789,7 @@ void drawDetail() {
 void drawSpectrum() {
   button(4, 3, 70, 22, "< BACK", false, CYAN, H_BACK);
   neonText("RF SCOPE // 2.4GHz", 84, 6, GREEN, &fonts::Font2, textdatum_t::top_left, 1);
-  char buf[48];
+  char buf[96];
   snprintf(buf, sizeof(buf), "WIFI %.0f/s  BLE %.0f/s", s_wifiPps, s_blePps);
   text(buf, 436, 10, TEXT, &fonts::Font0, textdatum_t::top_right);
   drawBattery(446);
@@ -828,16 +837,37 @@ void drawSpectrum() {
       g.fillRect(x, wy + r * cellH, bw, cellH - 1, v ? heat(v / 255.f) : BG2);
     }
   }
-  text("tap a channel to lock it, HOP to resume hopping", 240, 285, DIM, &fonts::Font0, textdatum_t::top_center);
+  // Capture status replaces the hint while there's something to report
+  const capture::Status& cs = capture::status();
+  if (cs.state == capture::CAP_REC || cs.state == capture::CAP_STOPPING) {
+    const uint32_t secs = (millis() - cs.startedAt) / 1000;
+    snprintf(buf, sizeof(buf), "%s  %lu pkts  %.1f MB  %02lu:%02lu", cs.file + 6, (unsigned long)cs.packets,
+             cs.bytes / 1048576.f, (unsigned long)(secs / 60), (unsigned long)(secs % 60));
+    if (cs.dropped) snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "  drop %lu", (unsigned long)cs.dropped);
+    text(buf, 240, 285, RED, &fonts::Font0, textdatum_t::top_center);
+  } else if (cs.state == capture::CAP_STARTING) {
+    text("mounting SD card...", 240, 285, YELLOW, &fonts::Font0, textdatum_t::top_center);
+  } else if (cs.state == capture::CAP_ERROR) {
+    snprintf(buf, sizeof(buf), "capture: %s", cs.msg);
+    text(buf, 240, 285, RED, &fonts::Font0, textdatum_t::top_center);
+  } else if (cs.file[0]) {
+    snprintf(buf, sizeof(buf), "%s %s, %.1f MB. tap a channel to lock it", cs.file + 6, cs.msg, cs.bytes / 1048576.f);
+    text(buf, 240, 285, DIM, &fonts::Font0, textdatum_t::top_center);
+  } else {
+    text("tap a channel to lock it, HOP to resume. REC saves .pcap to SD", 240, 285, DIM, &fonts::Font0,
+         textdatum_t::top_center);
+  }
 
   // Controls
   char lb[24];
   if (radio::hopping()) snprintf(lb, sizeof(lb), "HOP: AUTO");
-  else snprintf(lb, sizeof(lb), "LOCKED CH %d", radio::channel());
-  button(4, 297, 116, 21, lb, !radio::hopping(), YELLOW, H_HOP);
-  button(126, 297, 100, 21, radio::wifiEnabled() ? "WIFI: ON" : "WIFI: OFF", radio::wifiEnabled(), CYAN, H_WIFI);
-  button(232, 297, 100, 21, radio::bleEnabled() ? "BLE: ON" : "BLE: OFF", radio::bleEnabled(), BLUE, H_BLE);
-  button(338, 297, 138, 21, audio::enabled() ? "SOUND: ON" : "SOUND: OFF", audio::enabled(), GREEN, H_SOUND);
+  else snprintf(lb, sizeof(lb), "LOCK CH %d", radio::channel());
+  button(4, 297, 96, 21, lb, !radio::hopping(), YELLOW, H_HOP);
+  button(104, 297, 84, 21, radio::wifiEnabled() ? "WIFI: ON" : "WIFI: OFF", radio::wifiEnabled(), CYAN, H_WIFI);
+  button(192, 297, 80, 21, radio::bleEnabled() ? "BLE: ON" : "BLE: OFF", radio::bleEnabled(), BLUE, H_BLE);
+  button(276, 297, 96, 21, audio::enabled() ? "SOUND: ON" : "SOUND: OFF", audio::enabled(), GREEN, H_SOUND);
+  const bool rec = capture::active();
+  button(376, 297, 100, 21, rec ? "STOP REC" : "REC PCAP", rec, RED, H_REC);
 }
 
 // ---------------- NETWORK SCREENS ----------------
@@ -1267,18 +1297,44 @@ void drawHost() {
       text(" or may test)", 280, 104, DARK, &fonts::Font0);
     } else {
       int py = 66;
-      for (int i = 0; i < h->nPorts && py < 236; i++, py += 14) {
+      bool hasSsh = false;
+      for (int i = 0; i < h->nPorts && py < 196; i++, py += 14) {
         snprintf(buf, sizeof(buf), "%5u/tcp  %s", h->ports[i], net::portName(h->ports[i]));
         const bool cam = h->ports[i] == 554;
         text(buf, 280, py, cam ? ORANGE : GREEN, &fonts::Font0);
+        if (h->ports[i] == 22) hasSsh = true;
       }
       if (h->portScan == 1) {
         text((millis() / 300) & 1 ? "probing..." : "probing.. ", 280, py, YELLOW, &fonts::Font0);
       } else if (!h->nPorts) {
         text("none open (filtered)", 280, py, DIM, &fonts::Font0);
       }
+
+      // SSH posture panel (only once a scan has shown 22 open)
+      if (hasSsh) {
+        g.drawFastHLine(280, 202, 188, DARK);
+        text("SSH POSTURE", 280, 206, CYAN, &fonts::Font0);
+        if (h->sshState == 1) {
+          text((millis() / 300) & 1 ? "auditing..." : "auditing.. ", 364, 206, YELLOW, &fonts::Font0);
+        }
+        if (h->sshBanner[0]) text(h->sshBanner, 280, 218, TEXT, &fonts::Font0);
+        if (h->sshWarn[0]) {
+          const uint16_t wc = h->sshState == 3 ? DIM : h->sshRisk >= 2 ? RED : GREEN;
+          text(h->sshWarn, 280, 218 + (h->sshBanner[0] ? 10 : 0), wc, &fonts::Font0);
+        } else if (h->sshState == 0) {
+          text("key-only? tap CHECK SSH", 280, 218, DARK, &fonts::Font0);
+        }
+      }
+
+      if (hasSsh) {
+        button(278, 240, 92, 22, h->portScan == 1 ? "PORTS" : "RE-PROBE", false, YELLOW, H_PORTSCAN, s_hostSel);
+        button(374, 240, 94, 22, h->sshState == 1 ? "..." : "CHECK SSH", h->sshState == 1, CYAN, H_SSHCHECK, s_hostSel);
+      } else {
+        button(278, 240, 190, 22, h->portScan == 1 ? "PROBING..." : "PROBE PORTS", h->portScan == 1, YELLOW, H_PORTSCAN, s_hostSel);
+      }
     }
-    button(278, 240, 190, 22, h->portScan == 1 ? "PROBING..." : "PROBE PORTS", h->portScan == 1, YELLOW, H_PORTSCAN, s_hostSel);
+    if (h->portScan == 0)
+      button(278, 240, 190, 22, "PROBE PORTS", false, YELLOW, H_PORTSCAN, s_hostSel);
   } else {
     text("no IP known: can't probe", 280, 66, DIM, &fonts::Font0);
   }
@@ -1507,7 +1563,8 @@ void drawSettings() {
   text(FW_NAME " v" FW_VERSION, 468, 280, DARK, &fonts::Font0, textdatum_t::top_right);
 
   button(4, 297, 130, 21, "TEST ALERT", false, MAGENTA, H_TESTALERT);
-  text("hold BOOT 1s: touch test", 240, 307, DARK, &fonts::Font0, textdatum_t::middle_center);
+  button(180, 297, 120, 21, "TOUCH TEST", false, CYAN, H_TOUCHTEST);
+  text("BOOT button = power off", 240, 288, DARK, &fonts::Font0, textdatum_t::middle_center);
   button(346, 297, 130, 21, "RESET DEFAULTS", false, RED, H_RESETCFG);
 }
 
@@ -1529,8 +1586,8 @@ void drawTouchTest(const touch::State& t) {
       s_trailN = min(s_trailN + 1, 48);
     }
   }
-  neonText("TOUCH TEST", 8, 6, YELLOW, &fonts::Font2, textdatum_t::top_left, 1);
-  text("press BOOT to exit", 472, 10, DIM, &fonts::Font0, textdatum_t::top_right);
+  button(4, 3, 70, 22, "< BACK", false, CYAN, H_BACK);
+  neonText("TOUCH TEST", 84, 6, YELLOW, &fonts::Font2, textdatum_t::top_left, 1);
   g.drawFastHLine(0, 28, SCREEN_W, YELLOW);
 
   // Targets: corners + centre. If a tap lands far from the target you touch,
@@ -1650,10 +1707,18 @@ void onTap(int x, int y) {
         openDetail(h.arg);
         break;
       case H_BACK:
-        if (s_screen == SCR_DETAIL) closeDetail();
+        if (s_screen == SCR_TOUCH) s_screen = s_touchReturn;
+        else if (s_screen == SCR_DETAIL) closeDetail();
         else if (s_screen == SCR_HOST || s_screen == SCR_KEYB) s_screen = SCR_NET;
         else s_screen = SCR_LIST;
         led::setHeat(-1);
+        break;
+      case H_TOUCHTEST:
+        ui::openTouchTest();
+        break;
+      case H_REC:
+        if (capture::active()) capture::stop();
+        else capture::start();
         break;
       case H_SOUND:
         settings::get().sound = !settings::get().sound;
@@ -1762,6 +1827,9 @@ void onTap(int x, int y) {
       case H_PORTSCAN:
         net::probePorts(h.arg);
         break;
+      case H_SSHCHECK:
+        net::probeSsh(h.arg);
+        break;
       case H_TRACKRF:
         openDetail(h.arg);
         break;
@@ -1864,7 +1932,13 @@ void bootDone() {
   }
   s_screen = SCR_LIST;
   s_nextGlitch = millis() + 2500;
-  if (digitalRead(PIN_BOOT_BTN) == LOW) openTouchTest();
+}
+
+void showPowerOff() {
+  g.fillScreen(BG);
+  neonText("POWERING OFF", SCREEN_W / 2, SCREEN_H / 2 - 18, CYAN, &fonts::Font4, textdatum_t::middle_center, 1);
+  text("press BOOT to wake", SCREEN_W / 2, SCREEN_H / 2 + 16, DIM, &fonts::Font2, textdatum_t::middle_center);
+  display::pushFrame((const uint16_t*)g.getBuffer());
 }
 
 void openTouchTest() {
@@ -1884,9 +1958,21 @@ void onNewDevice(int idx) {
   logEvent("+%s %s %s %ddBm", d.medium == MED_BLE ? "bt" : "wf", d.label, d.name[0] ? d.name : mac, d.rssi);
 }
 
+// Log capture start/stop/errors to the event ticker
+void watchCapture() {
+  static capture::State prev = capture::CAP_OFF;
+  const capture::Status& cs = capture::status();
+  if (cs.state == prev) return;
+  if (cs.state == capture::CAP_REC) logEvent("rec %s", cs.file);
+  else if (cs.state == capture::CAP_OFF && prev == capture::CAP_STOPPING) logEvent("pcap %s", cs.msg);
+  else if (cs.state == capture::CAP_ERROR) logEvent("!! capture: %s", cs.msg);
+  prev = cs.state;
+}
+
 void frame(const touch::State& t, bool backButton) {
   s_frameNo++;
   updateRates();
+  watchCapture();
 
   if (backButton && s_screen != SCR_LIST) {
     if (s_screen == SCR_TOUCH) s_screen = s_touchReturn;

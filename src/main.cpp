@@ -8,8 +8,10 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "esp_sleep.h"
 #include "audio.h"
 #include "battery.h"
+#include "capture.h"
 #include "config.h"
 #include "devices.h"
 #include "display.h"
@@ -25,7 +27,27 @@ uint32_t s_lastFrame = 0;
 uint32_t s_lastExpire = 0;
 bool s_btnPrev = true;
 uint32_t s_btnDownAt = 0;
-bool s_btnLongFired = false;
+
+// BOOT button powers the device down; the same button wakes it (which reboots).
+void enterDeepSleep() {
+  Serial.println("[pwr] entering deep sleep");
+  if (capture::active()) {
+    capture::stop();
+    for (int i = 0; i < 200 && capture::active(); i++) delay(10);  // let the file close
+  }
+  settings::update();   // flush any pending NVS write
+  net::disconnect();
+  ui::showPowerOff();
+  delay(900);
+  display::setBacklight(0);
+  led::flash(0);        // LED off
+  led::update();
+  // Wait for release so we don't immediately wake on the press that sent us here
+  while (digitalRead(PIN_BOOT_BTN) == LOW) delay(10);
+  delay(80);
+  esp_sleep_enable_ext1_wakeup(1ULL << PIN_BOOT_BTN, ESP_EXT1_WAKEUP_ANY_LOW);  // wake on BOOT press
+  esp_deep_sleep_start();  // never returns; wake triggers a fresh boot
+}
 }  // namespace
 
 void setup() {
@@ -57,6 +79,8 @@ void setup() {
   ui::bootLine("> es8311 audio codec", audio::begin() ? 1 : -1);
   settings::begin();  // volume, brightness, LED, alert prefs from NVS
   ui::bootLine("> user settings (nvs)", 1);
+
+  capture::begin();  // before the sniffer starts feeding it
 
   ui::bootLine("> wifi promiscuous 2.4ghz + ble observer", 0);
   ui::bootLine("> wifi promiscuous 2.4ghz + ble observer", radio::begin() ? 1 : -1);
@@ -94,20 +118,14 @@ void loop() {
 
   if (now - s_lastFrame >= 1000 / TARGET_FPS) {
     s_lastFrame = now;
-    // BOOT button: short press = back, hold 1 s = touch test screen
+    // BOOT button: a press powers the device off (wake = press = reboot).
+    // Trigger on release of a debounced press so a brush doesn't sleep it.
     const bool btn = digitalRead(PIN_BOOT_BTN);
-    bool backPressed = false;
-    if (!btn && s_btnPrev) s_btnDownAt = now;
-    if (!btn && !s_btnLongFired && now - s_btnDownAt > 1000) {
-      s_btnLongFired = true;
-      ui::openTouchTest();
-    }
-    if (btn && !s_btnPrev) {
-      if (!s_btnLongFired) backPressed = true;
-      s_btnLongFired = false;
-    }
+    if (!btn && s_btnPrev) s_btnDownAt = now;        // falling edge
+    if (btn && !s_btnPrev && now - s_btnDownAt >= 40)  // released after a real press
+      enterDeepSleep();
     s_btnPrev = btn;
-    ui::frame(touch::read(), backPressed);
+    ui::frame(touch::read(), false);
   } else {
     delay(1);
   }

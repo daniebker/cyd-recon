@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "../../src/audio.h"
 #include "../../src/battery.h"
+#include "../../src/capture.h"
 #include "../../src/devices.h"
 #include "../../src/display.h"
 #include "../../src/led.h"
@@ -47,6 +48,23 @@ void pushFrame(const uint16_t* f) {
   g_shot = nullptr;
 }
 }  // namespace display
+namespace capture {
+static Status cst = {};
+void begin() {}
+void start() {
+  cst.state = CAP_REC;
+  strcpy(cst.file, "/pcap/cap_0007.pcap");
+  cst.packets = 48213;
+  cst.bytes = 11534336;
+  cst.startedAt = millis() - 194000;
+  cst.cardFree = 29ull << 30;
+}
+void stop() { cst.state = CAP_OFF; }
+bool active() { return cst.state == CAP_REC; }
+const Status& status() { return cst; }
+void onWifiFrame(const uint8_t*, uint32_t, uint8_t, int8_t) {}
+}  // namespace capture
+
 namespace audio {
 static bool en = true;
 bool begin() { return true; }
@@ -142,6 +160,10 @@ void finishConnect() {
   uint16_t ports[] = {22, 80, 443, 445, 5000};
   memcpy(hosts[2].ports, ports, sizeof(ports));
   hosts[2].nPorts = 5;
+  hosts[2].sshState = 2;
+  hosts[2].sshRisk = 2;
+  strcpy(hosts[2].sshBanner, "OpenSSH_7.4");
+  strcpy(hosts[2].sshWarn, "weak: hostkey, cipher");
 }
 void disconnect() { st = NET_IDLE; }
 bool st_connected() { return st == NET_CONNECTED; }
@@ -163,6 +185,7 @@ const char* nameSrcText(uint8_t s) {
   return s == NAME_SELF ? "this device" : s == NAME_MDNS ? "mdns" : s == NAME_DNS ? "dns" : s == NAME_NETBIOS ? "netbios" : "";
 }
 void probePorts(int) {}
+void probeSsh(int) {}
 const char* portName(uint16_t p) { return p == 22 ? "ssh" : p == 80 ? "http" : p == 443 ? "https" : p == 445 ? "smb" : "upnp"; }
 void ipToStr(uint32_t ip, char* out) {
   snprintf(out, 16, "%u.%u.%u.%u", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24);
@@ -364,11 +387,19 @@ int main(int argc, char** argv) {
   shot(p);
   tap(30, 14);
 
-  tap(440, 43);  // RF scope
+  tap(379, 43);  // RF scope
   tick(80);
   snprintf(p, sizeof p, "%s/07_spectrum.ppm", out);
   shot(p);
+  tap(426, 307);  // REC PCAP
+  tick(2);
+  snprintf(p, sizeof p, "%s/17_capture.ppm", out);
+  shot(p);
   tap(30, 14);
+  tick(1);
+  snprintf(p, sizeof p, "%s/18_capture_header.ppm", out);
+  shot(p);
+  capture::stop();
 
   // Battery draining into the low warning
   for (int mv = 1960; mv >= 1785; mv -= 5) {
