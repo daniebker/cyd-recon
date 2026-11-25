@@ -1,0 +1,17 @@
+CYD//RECON includes data and register sequences derived from the following works:
+
+* Flock Safety / Raven / SoundThinking detection heuristics (SSID keywords,
+  BLE names, BLE company ID, MAC prefixes, Raven service UUIDs) adapted from
+  flock-you-esp32 - https://github.com/simeononsecurity/flock-you-esp32
+  Licensed under the Apache License 2.0. Those heuristics in turn credit
+  colonelpanichacks/flock-you, wgreenberg/flock-you, GainSec, @NitekryDPaul
+  and DeFlock contributors.
+
+* ES8311 codec bring-up sequence follows Espressif's es8311 component
+  (Copyright Espressif Systems (Shanghai) CO LTD, Apache License 2.0),
+  reimplemented on top of Arduino Wire.
+
+* ST77922 panel initialisation register values and the FNK0104N pin map come
+  from Freenove's board support files for the FNK0104N
+  (https://github.com/Freenove/Freenove_ESP32_S3_Display). The driver code in
+  src/display.cpp is an independent implementation.
