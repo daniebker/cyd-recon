@@ -7,10 +7,12 @@ Passive radio recon firmware for the **Freenove ESP32-S3 Display 3.5"** (FNK0104
 | ![list](docs/img/02_list.png) | ![alert](docs/img/04_toast.png) |
 | **Target tracker** | **RF scope** |
 | ![tracker](docs/img/05_track_wifi.png) | ![scope](docs/img/07_spectrum.png) |
+| **Network: devices on your LAN** | **Host detail + port probe** |
+| ![lan](docs/img/13_net_linked.png) | ![host](docs/img/14_host.png) |
 
 *(Screenshots rendered by `tools/preview` with simulated devices.)*
 
-> **Receive-only.** The firmware never transmits a frame, never associates and never connects to anything. BLE scanning is passive.
+> **Receive-only unless you join a network.** Out of the box the firmware never transmits. WiFi capture and BLE scanning are passive. Joining a network (the NETWORK screen) is opt-in, and once joined the device does talk on that network: DHCP, ARP sweep, mDNS and ping, plus port probes when you ask for them.
 
 ## Features
 
@@ -39,6 +41,12 @@ Passive radio recon firmware for the **Freenove ESP32-S3 Display 3.5"** (FNK0104
   - It shows a bolt while charging, `FULL` at the charge ceiling, and `USB PWR` when no cell is fitted.
   - You get a one-off banner, chirp and LED flash at 15% and again at 5%.
   - The live voltage appears in the bottom status ticker.
+- **Network mode** (the NETWORK button on the main screen):
+  - **Joining:** pick a network the sniffer has heard, or type a hidden SSID. Enter the password on the on-screen keyboard (SHIFT / #+= / SHOW). Up to 6 networks are saved, and AUTO-JOIN connects to the strongest saved one at boot.
+  - **Link stats:** SSID, BSSID, signal, channel, uptime, gateway ping, IP, mask, gateway, DNS and your MAC.
+  - **Connected devices:** found by an ARP sweep of your /24 and named via mDNS (hostname plus services such as cast, airplay, printer, ssh, homekit). Vendors come from MAC OUIs. Wireless clients the sniffer hears talking to your access point are merged in with their live signal strength, so devices that ignore ARP still show up.
+  - **Host detail:** role, IP, MAC, vendor, name, services and when it was last seen. Includes the over-the-air signal and fingerprint if the sniffer has heard it (e.g. a GoPro on your WiFi). **PROBE PORTS** checks 17 common TCP ports (ssh, http, rtsp, smb, printer, cast...), and **TRACK RF SIGNAL** jumps into the hot/cold tracker to physically find it.
+  - **Channel:** while joined, the sniffer stays on your access point's channel, because hopping would drop the link. BLE keeps scanning normally.
 - Alerts are also printed over USB serial as CSV: `[ALERT] category,label,mac,rssi,reason`.
 
 ## Build and flash
@@ -61,6 +69,18 @@ esptool --chip esp32s3 write-flash 0x0 release/cyd-recon-fnk0104n-full.bin
 
 The project uses the [pioarduino](https://github.com/pioarduino/platform-espressif32) platform (Arduino-ESP32 3.x / ESP-IDF 5.x), board settings for 16 MB flash and 8 MB OPI PSRAM, and the `huge_app` partition table. If the upload doesn't start, hold **BOOT**, tap **RST**, release BOOT, and try again.
 
+**Wrong port picked?** PlatformIO auto-selects the first serial port it finds, which can be a Bluetooth device such as headphones or a DAC. The board shows up as `/dev/cu.usbmodem…` on macOS, `/dev/ttyACM…` on Linux and `COMx` on Windows. List the ports, then pass the right one:
+
+```bash
+pio device list
+```
+
+```bash
+pio run -t upload --upload-port /dev/cu.usbmodem1101
+```
+
+Or uncomment `upload_port` / `monitor_port` in `platformio.ini`.
+
 ## Controls
 
 | Where | Action |
@@ -68,6 +88,7 @@ The project uses the [pioarduino](https://github.com/pioarduino/platform-espress
 | List | Tap a tab to filter, tap SORT to cycle the sort order, drag to scroll, tap a row to track it |
 | Alert pop-up | Tap it to jump straight into tracking that device |
 | Tracker | GEIGER on/off, CH LOCK (WiFi), SET/CLEAR MARK, RESET PEAK |
+| Network | Tap a network to join (saved and open networks join instantly), HIDDEN / OTHER SSID, AUTO-JOIN. Once joined: RESCAN, DISCONNECT, FORGET NET, tap a device for details |
 | Anywhere | **BOOT** button or the `< BACK` button returns to the list |
 
 ## Hunting tips
@@ -93,6 +114,7 @@ src/
   touch.*         I2C touch controller
   audio.*         ES8311 codec + synth task (blips, alert chirp, Geiger ticker)
   led.*           WS2812 status LED
+  net.*           station mode, saved networks, ARP sweep, mDNS, ping, port probe
   radio.*         WiFi promiscuous sniffer, channel hopper, BLE observer, Remote ID decoder
   devices.*       device table, RSSI smoothing, filters and sorting
   signatures.*    fingerprint database + classifier (add your own signatures here)
@@ -110,4 +132,4 @@ tools/preview/run.sh
 
 ## Legal
 
-Passive reception of broadcast radio is legal in most places, but laws differ. Don't use this to stalk or harass anyone. Finding a tracker that someone planted on *you* is exactly what it's for. See `NOTICE` for third-party data credits.
+Passive reception of broadcast radio is legal in most places, but laws differ. Only join, sweep and port-probe networks you own or have permission to test. Don't use this to stalk or harass anyone. Finding a tracker that someone planted on *you* is exactly what it's for. See `NOTICE` for third-party data credits.
