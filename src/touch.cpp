@@ -7,8 +7,11 @@ namespace {
 // Integrated controller (Sitronix-style, 16-bit register addresses)
 constexpr uint16_t ST_STATUS = 0x0001;
 constexpr uint16_t ST_MAX_XY = 0x0005;
+constexpr uint16_t ST_MAX_TOUCHES = 0x0009;
 constexpr uint16_t ST_TOUCH_INFO = 0x0010;
 constexpr uint16_t ST_POINT0 = 0x0014;
+constexpr size_t ST_POINT_LEN = 7;
+constexpr uint8_t ST_MAX_POINTS = 10;
 // FT6336
 constexpr uint8_t FT_ADDR = 0x38;
 
@@ -17,6 +20,7 @@ touch::Diag s_diag;
 uint32_t s_lastValidMs = 0;
 uint32_t s_lastRetry = 0;
 int s_errStreak = 0;
+uint8_t s_stPoints = 1;  // touch slots the ST controller reports (reg 0x0009)
 
 bool probe(uint8_t addr) {
   Wire.beginTransmission(addr);
@@ -68,6 +72,8 @@ bool detect() {
             s_diag.maxX = ((r[0] & 0x3F) << 8) | r[1];
             s_diag.maxY = ((r[2] & 0x3F) << 8) | r[3];
           }
+          uint8_t n = 0;
+          s_stPoints = readST(ST_MAX_TOUCHES, &n, 1) && n >= 1 && n <= ST_MAX_POINTS ? n : ST_MAX_POINTS;
           s_diag.chip = touch::CHIP_ST_55;
           return true;
         }
@@ -112,7 +118,7 @@ bool begin() {
   const bool ok = detect();
   Serial.printf("[touch] i2c devices:");
   for (int i = 0; i < s_diag.nFound; i++) Serial.printf(" 0x%02X", s_diag.i2cFound[i]);
-  Serial.printf("\n[touch] chip=%s status=0x%02X res=%ux%u\n", chipName(), s_diag.status, s_diag.maxX, s_diag.maxY);
+  Serial.printf("\n[touch] chip=%s status=0x%02X res=%ux%u points=%u\n", chipName(), s_diag.status, s_diag.maxX, s_diag.maxY, s_stPoints);
   return ok;
 }
 
@@ -139,8 +145,12 @@ State read() {
       ok = true;
       s_diag.lastInfo = info;
       if (info & 0x08) {
-        uint8_t p[7];
-        if (readST(ST_POINT0, p, sizeof(p)) && (p[0] & 0x80)) {
+        // Read every point slot in one transaction, as Freenove's driver does:
+        // the controller only releases its report (and INT) once the whole
+        // block has been read. Reading just point 0 leaves it latched on the
+        // first touch forever.
+        uint8_t p[ST_POINT_LEN * ST_MAX_POINTS];
+        if (readST(ST_POINT0, p, ST_POINT_LEN * s_stPoints) && (p[0] & 0x80)) {
           setPoint(((p[0] & 0x3F) << 8) | p[1], ((p[2] & 0x3F) << 8) | p[3], now);
           touched = true;
         }
