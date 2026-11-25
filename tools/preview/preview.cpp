@@ -7,6 +7,7 @@
 #include "../../src/devices.h"
 #include "../../src/display.h"
 #include "../../src/led.h"
+#include "../../src/net.h"
 #include "../../src/radio.h"
 #include "../../src/ui.h"
 
@@ -19,6 +20,7 @@ uint32_t esp_random() { return (uint32_t)rand() * 2654435761u; }
 static uint32_t g_batMv = 1960;  // ADC pin mV (cell = 2x)
 uint32_t analogReadMilliVolts(int) { return g_batMv; }
 
+namespace net { bool st_connected(); }
 // ---- stubs for hardware modules ----
 static const char* g_shot = nullptr;
 namespace display {
@@ -63,7 +65,10 @@ void update() {}
 bool poll(Obs&) { return false; }
 void lockChannel(uint8_t c) { lockCh = c; }
 uint8_t channel() { return lockCh ? lockCh : 6; }
-bool hopping() { return lockCh == 0; }
+bool hopping() { return lockCh == 0 && !net::st_connected(); }
+uint8_t stationChannel() { return net::st_connected() ? 6 : 0; }
+void setStationChannel(uint8_t) {}
+void setPromiscuous(bool) {}
 void setWifiEnabled(bool) {}
 void setBleEnabled(bool) {}
 bool wifiEnabled() { return true; }
@@ -74,6 +79,83 @@ uint32_t wifiPackets() { return wp; }
 uint32_t blePackets() { return bp; }
 uint32_t dropped() { return 0; }
 }  // namespace radio
+
+namespace net {
+static State st = NET_IDLE;
+static Info inf;
+static Host hosts[MAX_HOSTS];
+static bool autoOn = true;
+void begin() {}
+void update() {}
+static uint32_t ip(int a, int b, int c, int d) { return a | (b << 8) | (c << 16) | ((uint32_t)d << 24); }
+bool connect(const char* ssid, const char*, uint8_t ch, const uint8_t* bssid, bool) {
+  st = NET_CONNECTING;
+  strcpy(inf.ssid, ssid);
+  inf.channel = ch;
+  if (bssid) memcpy(inf.bssid, bssid, 6);
+  return true;
+}
+void finishConnect() {
+  st = NET_CONNECTED;
+  inf.ip = ip(192, 168, 1, 42);
+  inf.mask = ip(255, 255, 255, 0);
+  inf.gateway = ip(192, 168, 1, 1);
+  inf.dns = ip(192, 168, 1, 1);
+  inf.rssi = -58;
+  inf.connectedAt = millis() - 754000;
+  inf.gatewayPingMs = 4;
+  const uint8_t me[6] = {0xDC, 0xDA, 0x0C, 0x21, 0x9E, 0x40};
+  memcpy(inf.mac, me, 6);
+  struct { int last; const char* mac; const char* name; const char* svc; } hs[] = {
+    {1, "A4:2B:B0:11:22:30", "", "http"},
+    {42, "DC:DA:0C:21:9E:40", "cyd-recon", ""},
+    {10, "00:11:32:AA:01:02", "nas", "http smb ssh"},
+    {23, "F0:18:98:44:12:9C", "Daniels-MacBook", "apple ssh"},
+    {31, "3C:5A:B4:9A:77:10", "Living-Room-TV", "cast"},
+    {37, "04:41:69:5E:12:9B", "", ""},
+    {54, "D8:31:34:00:FE:11", "", "airplay"},
+    {77, "6E:21:9A:0D:44:3B", "", ""},
+  };
+  int n = 0;
+  for (auto& x : hs) {
+    Host& h = hosts[n++];
+    h.used = true;
+    h.ip = ip(192, 168, 1, x.last);
+    unsigned v[6];
+    sscanf(x.mac, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+    for (int i = 0; i < 6; i++) h.mac[i] = v[i];
+    strcpy(h.name, x.name);
+    strcpy(h.services, x.svc);
+    h.firstSeen = millis() - 600000;
+    h.lastSeen = millis() - (n * 3000);
+  }
+  hosts[2].portScan = 2;
+  uint16_t ports[] = {22, 80, 443, 445, 5000};
+  memcpy(hosts[2].ports, ports, sizeof(ports));
+  hosts[2].nPorts = 5;
+}
+void disconnect() { st = NET_IDLE; }
+bool st_connected() { return st == NET_CONNECTED; }
+State state() { return st; }
+const char* statusText() { return st == NET_CONNECTING ? "connecting to NETGEAR-5G-Home" : "offline"; }
+const Info& info() { return inf; }
+bool savedPassword(const char* ssid, char* p, size_t n) {
+  if (strcmp(ssid, "TP-Link_8A2C") == 0) { if (n) p[0] = 0; return true; }
+  return false;
+}
+void forget(const char*) {}
+bool autoConnect() { return autoOn; }
+void setAutoConnect(bool on) { autoOn = on; }
+int hostCount() { return MAX_HOSTS; }
+const Host& host(int i) { return hosts[i]; }
+void rescan() {}
+int sweepProgress() { return 100; }
+void probePorts(int) {}
+const char* portName(uint16_t p) { return p == 22 ? "ssh" : p == 80 ? "http" : p == 443 ? "https" : p == 445 ? "smb" : "upnp"; }
+void ipToStr(uint32_t ip, char* out) {
+  snprintf(out, 16, "%u.%u.%u.%u", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24);
+}
+}  // namespace net
 
 // ---- fake world ----
 static void mac(Obs& o, const char* s) {
@@ -290,6 +372,53 @@ int main(int argc, char** argv) {
     tick(25);
   }
   snprintf(p, sizeof p, "%s/09_battery_charging.ppm", out);
+  shot(p);
+
+  // ---- network ----
+  g_batMv = 1990;
+  for (int t = 0; t < 10; t++) { populate(300 + t); tick(3); }
+  tap(440, 43);  // NETWORK
+  snprintf(p, sizeof p, "%s/10_net_pick.ppm", out);
+  shot(p);
+  tap(200, 52 + 5);  // first AP (saved one sorts first) -> connects
+  snprintf(p, sizeof p, "%s/11_net_connecting.ppm", out);
+  shot(p);
+  net::disconnect();
+  tick(1);
+  tap(200, 52 + 30 + 5);  // second AP: WPA2, not saved -> keyboard
+  for (const char* k = "hunter2!"; *k; k++) {
+    // find key position on the keyboard
+    static const char* rows[] = {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm._@"};
+    bool hit = false;
+    for (int r = 0; r < 4 && !hit; r++)
+      for (int c = 0; c < 10; c++)
+        if (rows[r][c] == *k) { tap(5 + c * 47 + 20, 74 + r * 44 + 20); hit = true; break; }
+    if (!hit) { tap(78 + 30, 270); tap(5 + 0 * 47 + 20, 74 + 20); }  // '!' via #+= layer
+  }
+  snprintf(p, sizeof p, "%s/12_keyboard.ppm", out);
+  shot(p);
+  tap(121 + 50, 305);  // cancel
+  net::finishConnect();
+  {  // a wireless client heard over the air talking to our AP
+    Obs o{};
+    o.medium = MED_WIFI_STA;
+    mac(o, "04:41:69:5E:12:9B");
+    o.rssi = -61;
+    o.channel = 6;
+    memcpy(o.bssid, net::inf.bssid, 6);
+    devices::ingest(o);
+    Obs o2 = o;
+    mac(o2, "9A:11:3C:00:72:EE");
+    o2.rssi = -77;
+    devices::ingest(o2);
+  }
+  tick(3);
+  g_ms += 6000;  // let the GoPro alert toast time out
+  tick(1);
+  snprintf(p, sizeof p, "%s/13_net_linked.ppm", out);
+  shot(p);
+  tap(200, 136 + 28 * 2 + 5);  // a host row
+  snprintf(p, sizeof p, "%s/14_host.ppm", out);
   shot(p);
   return 0;
 }

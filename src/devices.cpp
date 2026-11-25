@@ -115,6 +115,8 @@ int ingest(const Obs& o) {
   } else {
     d.randomMac = d.mac[0] & 0x02;
     if (o.medium == MED_WIFI_AP) d.security = o.security;
+    static const uint8_t kZero[6] = {0};
+    if (o.medium == MED_WIFI_STA && memcmp(o.bssid, kZero, 6) != 0) memcpy(d.bssid, o.bssid, 6);
     if (o.flags & OBS_PROBE) {
       if (o.name[0] && strcmp(o.name, d.probe) != 0) {
         strlcpy(d.probe, o.name, sizeof(d.probe));
@@ -233,6 +235,14 @@ int list(Filter f, Sort s, int* out, int maxOut) {
     return a < b;  // stable ordering prevents list jitter
   });
   return n;
+}
+
+int find(const uint8_t* mac, bool wifiOnly) {
+  for (int i = 0; i < MAX_DEVICES; i++) {
+    const Device& d = s_dev[i];
+    if (d.used && memcmp(d.mac, mac, 6) == 0 && (!wifiOnly || d.medium != MED_BLE)) return i;
+  }
+  return -1;
 }
 
 int popAlert() {

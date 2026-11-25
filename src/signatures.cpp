@@ -87,6 +87,27 @@ const OuiSig kOui[] = {
     {{0xF0, 0x9F, 0xC2}, CAT_NONE, CONF_LOW, nullptr, "Ubiquiti"},
     {{0x00, 0x1A, 0x11}, CAT_NONE, CONF_LOW, nullptr, "Google"},
     {{0x00, 0x17, 0x88}, CAT_NONE, CONF_LOW, nullptr, "Philips Hue"},
+    {{0x00, 0x11, 0x32}, CAT_NONE, CONF_LOW, nullptr, "Synology"},
+    {{0x18, 0xB4, 0x30}, CAT_NONE, CONF_LOW, nullptr, "Nest"},
+    {{0x44, 0x65, 0x0D}, CAT_NONE, CONF_LOW, nullptr, "Amazon"},
+    {{0xFC, 0x65, 0xDE}, CAT_NONE, CONF_LOW, nullptr, "Amazon"},
+    {{0x00, 0x0E, 0x58}, CAT_NONE, CONF_LOW, nullptr, "Sonos"},
+    {{0x48, 0xA6, 0xB8}, CAT_NONE, CONF_LOW, nullptr, "Sonos"},
+    {{0x00, 0x1E, 0xC2}, CAT_NONE, CONF_LOW, nullptr, "Apple"},
+    {{0xF0, 0x18, 0x98}, CAT_NONE, CONF_LOW, nullptr, "Apple"},
+    {{0xAC, 0xBC, 0x32}, CAT_NONE, CONF_LOW, nullptr, "Apple"},
+    {{0x3C, 0x5A, 0xB4}, CAT_NONE, CONF_LOW, nullptr, "Google"},
+    {{0xF4, 0xF5, 0xD8}, CAT_NONE, CONF_LOW, nullptr, "Google"},
+    {{0x00, 0x50, 0x56}, CAT_NONE, CONF_LOW, nullptr, "VMware"},
+    {{0x00, 0x1B, 0x63}, CAT_NONE, CONF_LOW, nullptr, "Apple"},
+    {{0x00, 0x0C, 0x29}, CAT_NONE, CONF_LOW, nullptr, "VMware"},
+    {{0x50, 0xC7, 0xBF}, CAT_NONE, CONF_LOW, nullptr, "TP-Link"},
+    {{0xB0, 0xBE, 0x76}, CAT_NONE, CONF_LOW, nullptr, "TP-Link"},
+    {{0x00, 0x14, 0x6C}, CAT_NONE, CONF_LOW, nullptr, "Netgear"},
+    {{0x9C, 0x3D, 0xCF}, CAT_NONE, CONF_LOW, nullptr, "Netgear"},
+    {{0x34, 0x97, 0xF6}, CAT_NONE, CONF_LOW, nullptr, "ASUS"},
+    {{0x00, 0x90, 0xA9}, CAT_NONE, CONF_LOW, nullptr, "WD"},
+    {{0xD8, 0x31, 0x34}, CAT_NONE, CONF_LOW, nullptr, "Roku"},
 };
 
 // Flock Safety camera WiFi OUIs (community field data, flock-you-esp32 table A).
@@ -310,6 +331,13 @@ void classifyBleAdv(const Device& d, Hit& h, char* vendor, size_t vlen) {
 }  // namespace
 
 namespace signatures {
+
+const char* ouiVendor(const uint8_t* mac) {
+  if (mac[0] & 0x02) return nullptr;
+  for (const auto& s : kOui)
+    if (memcmp(s.oui, mac, 3) == 0) return s.vendor;
+  return nullptr;
+}
 
 const char* companyName(uint16_t id) {
   for (const auto& c : kCompany)

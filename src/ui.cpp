@@ -1,12 +1,14 @@
 #include "ui.h"
 #include <LovyanGFX.hpp>
 #include <math.h>
+#include <algorithm>
 #include "audio.h"
 #include "battery.h"
 #include "config.h"
 #include "devices.h"
 #include "display.h"
 #include "led.h"
+#include "net.h"
 #include "radio.h"
 #include "signatures.h"
 #include "theme.h"
@@ -17,8 +19,9 @@ namespace {
 
 LGFX_Sprite g;  // 480x320 frame buffer in PSRAM
 
-enum Screen : uint8_t { SCR_BOOT, SCR_LIST, SCR_DETAIL, SCR_SPECTRUM };
+enum Screen : uint8_t { SCR_BOOT, SCR_LIST, SCR_DETAIL, SCR_SPECTRUM, SCR_NET, SCR_KEYB, SCR_HOST };
 Screen s_screen = SCR_BOOT;
+Screen s_detailReturn = SCR_LIST;  // where BACK goes from the tracker
 
 // ---------------- hit testing (immediate mode) ----------------
 enum HitId : uint8_t {
@@ -37,6 +40,24 @@ enum HitId : uint8_t {
   H_BLE,
   H_CHBAR,
   H_CLEAR,
+  H_NET,
+  H_NETAP,
+  H_NETOTHER,
+  H_NETAUTO,
+  H_DISCONNECT,
+  H_FORGET,
+  H_RESCAN,
+  H_HOSTROW,
+  H_PORTSCAN,
+  H_TRACKRF,
+  H_KEY,
+  H_KSHIFT,
+  H_KSYM,
+  H_KSPACE,
+  H_KDEL,
+  H_KSHOW,
+  H_KCANCEL,
+  H_KOK,
 };
 struct Hit {
   int16_t x, y, w, h;
@@ -257,6 +278,15 @@ void drawBatteryWarning() {
   neonText(buf, x + w / 2, y + h / 2, crit ? RED : ORANGE, &fonts::Font2, textdatum_t::middle_center, 1);
 }
 
+void wifiIcon(int x, int y, uint16_t c, int bars) {
+  // three arcs + dot, bottom-centre at (x, y)
+  for (int i = 0; i < 3; i++) {
+    const int r = 4 + i * 4;
+    g.drawArc(x, y, r, r - 1, 225, 315, i < bars ? c : DARK);
+  }
+  g.fillCircle(x, y - 1, 1, c);
+}
+
 void header(const char* title) {
   const bool glitch = millis() < s_glitchUntil;
   const int split = glitch ? 2 + (esp_random() % 3) : 1;
@@ -269,12 +299,26 @@ void header(const char* title) {
   // Right status block
   char buf[40];
   drawBattery(446);
+  // Uplink indicator
+  if (!title) {
+    const net::State ns = net::state();
+    if (ns == net::NET_CONNECTED) {
+      const int r = net::info().rssi;
+      wifiIcon(190, 22, GREEN, r > -60 ? 3 : r > -72 ? 2 : 1);
+      char ss[14];
+      strlcpy(ss, net::info().ssid, sizeof(ss));
+      text(ss, 204, 15, GREEN, &fonts::Font0);
+    } else if (ns == net::NET_CONNECTING) {
+      wifiIcon(190, 22, ((millis() / 300) & 1) ? YELLOW : DARK, 3);
+      text("linking", 204, 15, YELLOW, &fonts::Font0);
+    }
+  }
 
   const int nf = devices::countFlagged();
   snprintf(buf, sizeof(buf), "WIFI %03d  BLE %03d", devices::countMedium(MED_WIFI_AP), devices::countMedium(MED_BLE));
   text(buf, 436, 4, TEXT, &fonts::Font0, textdatum_t::top_right);
   if (radio::hopping()) snprintf(buf, sizeof(buf), "CH%02d HOP", radio::channel());
-  else snprintf(buf, sizeof(buf), "CH%02d LOCK", radio::channel());
+  else snprintf(buf, sizeof(buf), radio::stationChannel() ? "CH%02d LINK" : "CH%02d LOCK", radio::channel());
   text(buf, 436, 15, radio::hopping() ? DIM : YELLOW, &fonts::Font0, textdatum_t::top_right);
   snprintf(buf, sizeof(buf), "ALERT %02d", nf);
   const bool blink = nf && ((millis() / 400) & 1);
@@ -402,13 +446,15 @@ void drawList() {
   static const char* kTabs[] = {"ALL", "ALERTS", "WIFI", "BLE"};
   char lab[16];
   for (int i = 0; i < 4; i++) {
-    if (i == 1) snprintf(lab, sizeof(lab), "ALERTS %d", devices::countFlagged());
+    if (i == 1) snprintf(lab, sizeof(lab), "ALERT %d", devices::countFlagged());
     else snprintf(lab, sizeof(lab), "%s", kTabs[i]);
-    button(4 + i * 78, 33, 74, 20, lab, s_filter == i, i == 1 ? MAGENTA : CYAN, H_FILTER, i);
+    button(4 + i * 67, 33, 64, 20, lab, s_filter == i, i == 1 ? MAGENTA : CYAN, H_FILTER, i);
   }
   static const char* kSort[] = {"SORT:SIGNAL", "SORT:NEWEST", "SORT:THREAT"};
-  button(318, 33, 86, 20, kSort[s_sort], false, YELLOW, H_SORT);
-  button(408, 33, 68, 20, "RF SCOPE", false, GREEN, H_SPECTRUM);
+  button(272, 33, 76, 20, kSort[s_sort], false, YELLOW, H_SORT);
+  button(351, 33, 56, 20, "RF SCOPE", false, GREEN, H_SPECTRUM);
+  button(410, 33, 66, 20, net::state() == net::NET_CONNECTED ? "NET: UP" : "NETWORK", net::state() == net::NET_CONNECTED,
+         MAGENTA, H_NET);
 
   s_listN = devices::list(s_filter, s_sort, s_listIdx, MAX_DEVICES);
   const int maxScroll = max(0, s_listN * kRowH - kListH);
@@ -453,6 +499,7 @@ void openDetail(int idx) {
   if (idx < 0 || !devices::at(idx).used) return;
   s_sel = idx;
   memcpy(s_selMac, devices::at(idx).mac, 6);
+  s_detailReturn = (s_screen == SCR_HOST || s_screen == SCR_NET) ? s_screen : SCR_LIST;
   s_screen = SCR_DETAIL;
   s_mark = NAN;
   histReset();
@@ -472,7 +519,7 @@ void closeDetail() {
   if (s_autoLocked && !s_userLock) radio::lockChannel(0);
   s_autoLocked = false;
   s_sel = -1;
-  s_screen = SCR_LIST;
+  s_screen = s_detailReturn;
   audio::setGeiger(-1);
   led::setHeat(-1);
 }
@@ -773,6 +820,550 @@ void drawSpectrum() {
   button(338, 297, 138, 21, audio::enabled() ? "SOUND: ON" : "SOUND: OFF", audio::enabled(), GREEN, H_SOUND);
 }
 
+// ---------------- NETWORK SCREENS ----------------
+// AP picker (offline) / link stats + LAN host list (online)
+constexpr int kNetRowH = 30, kHostRowH = 28;
+int s_netScroll = 0;
+int s_netListY = 54, s_netListH = 238;
+int s_apIdx[MAX_DEVICES];
+int s_apN = 0;
+
+// LAN row: host index (>=0) and/or matching sniffed device (>=0)
+struct LanRow {
+  int16_t host;
+  int16_t dev;
+};
+LanRow s_lan[net::MAX_HOSTS + 48];
+int s_lanN = 0;
+int s_hostSel = -1;  // host index, or -(dev+2) for an RF-only client
+int s_rfClients = 0;
+
+// Keyboard state
+enum KbMode : uint8_t { KB_PASS, KB_SSID };
+KbMode s_kbMode = KB_PASS;
+char s_kbBuf[65];
+char s_kbSsid[33];
+uint8_t s_kbCh = 0;
+uint8_t s_kbBssid[6];
+uint8_t s_kbLayer = 0;
+bool s_kbShow = false;
+uint32_t s_kbLastKey = 0;
+
+
+int rssiBars(int rssi) { return rssi > -60 ? 3 : rssi > -72 ? 2 : rssi > -85 ? 1 : 0; }
+
+void openKeyboard(KbMode mode, const char* ssid, uint8_t ch, const uint8_t* bssid) {
+  s_kbMode = mode;
+  s_kbBuf[0] = 0;
+  strlcpy(s_kbSsid, ssid ? ssid : "", sizeof(s_kbSsid));
+  s_kbCh = ch;
+  if (bssid) memcpy(s_kbBssid, bssid, 6);
+  else memset(s_kbBssid, 0, 6);
+  s_kbLayer = 0;
+  s_kbShow = false;
+  s_screen = SCR_KEYB;
+}
+
+// Tap on an access point in the picker
+void pickAp(int devIdx) {
+  const Device& d = devices::at(devIdx);
+  if (!d.used) return;
+  char pass[65];
+  if (net::savedPassword(d.name, pass, sizeof(pass))) {
+    net::connect(d.name, pass, d.channel, d.mac, false);
+  } else if (d.security == 0) {
+    net::connect(d.name, "", d.channel, d.mac, true);
+  } else {
+    openKeyboard(KB_PASS, d.name, d.channel, d.mac);
+  }
+}
+
+void buildApList() {
+  s_apN = 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < devices::capacity(); i++) {
+    const Device& d = devices::at(i);
+    if (!d.used || d.medium != MED_WIFI_AP || !d.name[0] || d.name[0] == '<') continue;
+    if (now - d.lastSeen > 60000) continue;
+    // one row per SSID: keep the strongest BSSID
+    int dup = -1;
+    for (int k = 0; k < s_apN; k++)
+      if (strcmp(devices::at(s_apIdx[k]).name, d.name) == 0) dup = k;
+    if (dup >= 0) {
+      if (d.rssiFast > devices::at(s_apIdx[dup]).rssiFast) s_apIdx[dup] = i;
+      continue;
+    }
+    s_apIdx[s_apN++] = i;
+  }
+  std::sort(s_apIdx, s_apIdx + s_apN, [](int a, int b) {
+    char p[2];
+    const bool sa = net::savedPassword(devices::at(a).name, p, 1);
+    const bool sb = net::savedPassword(devices::at(b).name, p, 1);
+    if (sa != sb) return sa;
+    return devices::at(a).rssiFast > devices::at(b).rssiFast;
+  });
+}
+
+void buildLanList() {
+  const net::Info& ni = net::info();
+  s_lanN = 0;
+  // ARP hosts
+  for (int i = 0; i < net::hostCount(); i++) {
+    const net::Host& h = net::host(i);
+    if (!h.used) continue;
+    s_lan[s_lanN++] = {(int16_t)i, (int16_t)devices::find(h.mac, true)};
+  }
+  // Wireless clients heard talking to our AP that ARP hasn't found
+  s_rfClients = 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < devices::capacity() && s_lanN < (int)(sizeof(s_lan) / sizeof(s_lan[0])); i++) {
+    const Device& d = devices::at(i);
+    if (!d.used || d.medium != MED_WIFI_STA || memcmp(d.bssid, ni.bssid, 6) != 0) continue;
+    if (now - d.lastSeen > 300000) continue;
+    s_rfClients++;
+    bool known = false;
+    for (int k = 0; k < s_lanN; k++)
+      if (s_lan[k].dev == i) known = true;
+    if (!known) s_lan[s_lanN++] = {-1, (int16_t)i};
+  }
+  auto rank = [&](const LanRow& r) -> uint32_t {
+    if (r.host < 0) return 0xF0000000u;
+    const uint32_t ip = net::host(r.host).ip;
+    if (ip == ni.gateway) return 0;
+    if (ip == ni.ip) return 1;
+    return 2 + ntohl(ip) % 0x10000;
+  };
+  std::sort(s_lan, s_lan + s_lanN, [&](const LanRow& a, const LanRow& b) {
+    const uint32_t ra = rank(a), rb = rank(b);
+    if (ra != rb) return ra < rb;
+    if (a.dev >= 0 && b.dev >= 0) return devices::at(a.dev).rssiFast > devices::at(b.dev).rssiFast;
+    return a.dev > b.dev;
+  });
+}
+
+void netHeader(const char* title, uint16_t c) {
+  button(4, 3, 70, 22, "< BACK", false, CYAN, H_BACK);
+  neonText(title, 84, 6, c, &fonts::Font2, textdatum_t::top_left, 1);
+  drawBattery(446);
+  g.drawFastHLine(0, 28, SCREEN_W, c);
+  g.drawFastHLine(0, 29, SCREEN_W, lerp565(BG, c, 0.4f));
+}
+
+void drawApRow(int y, const Device& d, int i) {
+  g.fillRect(0, y, 472, kNetRowH - 1, (i & 1) ? BG : PANEL);
+  char pass[2];
+  const bool saved = net::savedPassword(d.name, pass, 1);
+  static const char* kSec[] = {"OPEN", "WEP", "WPA", "WPA2+"};
+  const uint16_t sc = d.security == 0 ? GREEN : d.security == 1 ? ORANGE : CYAN;
+  g.drawRect(8, y + 7, 46, 16, sc);
+  text(kSec[d.security & 3], 31, y + 15, sc, &fonts::Font0, textdatum_t::middle_center);
+  text(d.name, 62, y + 2, TEXT, &fonts::Font2);
+  char mac[18], sub[64];
+  devices::macToStr(d.mac, mac);
+  snprintf(sub, sizeof(sub), "ch%d  %s  %s", d.channel, mac, d.vendor);
+  text(sub, 62, y + 19, DIM, &fonts::Font0);
+  if (saved) {
+    g.fillRect(330, y + 8, 44, 14, YELLOW);
+    text("SAVED", 352, y + 15, BLACK, &fonts::Font0, textdatum_t::middle_center);
+  }
+  char r[8];
+  snprintf(r, sizeof(r), "%d", (int)roundf(d.rssiFast));
+  text(r, 420, y + 8, CYAN, &fonts::Font2, textdatum_t::top_right);
+  wifiIcon(448, y + 22, CYAN, rssiBars((int)d.rssiFast));
+}
+
+void drawNetOffline() {
+  netHeader("NETWORK // UPLINK", MAGENTA);
+  const net::State st = net::state();
+  const uint16_t sc = st == net::NET_FAILED ? RED : st == net::NET_CONNECTING ? YELLOW : DIM;
+  char buf[64];
+  snprintf(buf, sizeof(buf), "> %s", net::statusText());
+  text(buf, 8, 38, sc, &fonts::Font0);
+  text("select a network to join", 472, 38, DIM, &fonts::Font0, textdatum_t::top_right);
+
+  buildApList();
+  s_netListY = 52;
+  s_netListH = 240;
+  const int maxScroll = max(0, s_apN * kNetRowH - s_netListH);
+  s_netScroll = constrain(s_netScroll, 0, maxScroll);
+  g.setClipRect(0, s_netListY, SCREEN_W, s_netListH);
+  for (int i = s_netScroll / kNetRowH; i < s_apN; i++) {
+    const int y = s_netListY + i * kNetRowH - s_netScroll;
+    if (y >= s_netListY + s_netListH) break;
+    drawApRow(y, devices::at(s_apIdx[i]), i);
+    addHit(0, max(y, s_netListY), 472, kNetRowH, H_NETAP, s_apIdx[i]);
+  }
+  g.clearClipRect();
+  if (!s_apN) {
+    neonText("NO NETWORKS HEARD YET", 240, 160, CYAN, &fonts::Font4, textdatum_t::middle_center, 1);
+    text("the sniffer fills this list as it hops channels", 240, 186, DIM, &fonts::Font0, textdatum_t::middle_center);
+  }
+
+  if (st == net::NET_CONNECTING) {
+    const int x = 90, y = 120, w = 300, h = 70;
+    g.fillRect(x + 4, y + 4, w, h, BLACK);
+    cutRect(x, y, w, h, YELLOW, true, BG2);
+    neonText("LINKING...", x + w / 2, y + 22, YELLOW, &fonts::Font4, textdatum_t::middle_center, 1);
+    text(net::info().ssid, x + w / 2, y + 48, TEXT, &fonts::Font2, textdatum_t::middle_center);
+    const float a = millis() / 3.f;
+    g.fillArc(x + 28, y + 35, 14, 10, a, a + 100, MAGENTA);
+    g.fillArc(x + w - 28, y + 35, 14, 10, -a, -a + 100, CYAN);
+  }
+
+  button(4, 297, 150, 21, "HIDDEN / OTHER SSID", false, CYAN, H_NETOTHER);
+  button(160, 297, 150, 21, net::autoConnect() ? "AUTO-JOIN: ON" : "AUTO-JOIN: OFF", net::autoConnect(), YELLOW,
+         H_NETAUTO);
+  if (st == net::NET_CONNECTING) button(316, 297, 160, 21, "ABORT", false, RED, H_DISCONNECT);
+}
+
+void kvAt(int x, int y, const char* k, const char* v, uint16_t vc = TEXT) {
+  text(k, x, y, DIM, &fonts::Font0);
+  text(v, x + 54, y, vc, &fonts::Font0);
+}
+
+void drawHostRow(int y, const LanRow& r, int i) {
+  const net::Info& ni = net::info();
+  g.fillRect(0, y, 472, kHostRowH - 1, (i & 1) ? BG : PANEL);
+  const net::Host* h = r.host >= 0 ? &net::host(r.host) : nullptr;
+  const Device* d = r.dev >= 0 ? &devices::at(r.dev) : nullptr;
+  const uint32_t now = millis();
+
+  // badge
+  const char* lab = "HOST";
+  uint16_t bc = TEAL;
+  bool solid = false;
+  if (h && h->ip == ni.gateway) {
+    lab = "GATEWAY";
+    bc = MAGENTA;
+    solid = true;
+  } else if (h && h->ip == ni.ip) {
+    lab = "THIS";
+    bc = GREEN;
+    solid = true;
+  } else if (d && devices::isFlagged(*d)) {
+    lab = d->label;
+    bc = devices::categoryColor(d->category);
+    solid = true;
+  } else if (!h) {
+    lab = "RF ONLY";
+    bc = BLUE;
+  }
+  if (solid) {
+    g.fillRect(8, y + 6, 54, 16, bc);
+    text(lab, 35, y + 14, BLACK, &fonts::Font0, textdatum_t::middle_center);
+  } else {
+    g.drawRect(8, y + 6, 54, 16, bc);
+    text(lab, 35, y + 14, bc, &fonts::Font0, textdatum_t::middle_center);
+  }
+
+  char buf[64], mac[18];
+  const uint8_t* m = h ? h->mac : d->mac;
+  devices::macToStr(m, mac);
+  if (h) net::ipToStr(h->ip, buf);
+  else strlcpy(buf, "(no IP yet)", sizeof(buf));
+  text(buf, 70, y + 1, h ? TEXT : DIM, &fonts::Font2);
+  const char* vend = signatures::ouiVendor(m);
+  const char* name = (h && h->name[0]) ? h->name : nullptr;
+  g.setFont(&fonts::Font2);
+  const int nameX = 70 + max(110, (int)g.textWidth(buf) + 10);
+  if (name) text(name, nameX, y + 1, CYAN, &fonts::Font2);
+  snprintf(buf, sizeof(buf), "%s %s%s %s", mac, (m[0] & 2) ? "rnd " : "", vend ? vend : "", (h && h->services[0]) ? h->services : "");
+  text(buf, 70, y + 18, DIM, &fonts::Font0);
+
+  if (d && now - d->lastSeen < 60000) {
+    snprintf(buf, sizeof(buf), "%d", (int)roundf(d->rssiFast));
+    text(buf, 410, y + 7, CYAN, &fonts::Font2, textdatum_t::top_right);
+    signalBars(416, y + 6, d->rssiFast, CYAN);
+  } else {
+    text("wired/quiet", 446, y + 10, DARK, &fonts::Font0, textdatum_t::top_right);
+  }
+  const uint32_t seen = h ? h->lastSeen : d->lastSeen;
+  char age[8];
+  ageStr(now - seen, age, sizeof(age));
+  text(age, 470, y + 10, DIM, &fonts::Font0, textdatum_t::top_right);
+}
+
+void drawNetOnline() {
+  const net::Info& ni = net::info();
+  netHeader("NETWORK // LINKED", GREEN);
+  char buf[64], b2[20];
+  const uint32_t now = millis();
+
+  cutRect(4, 33, 472, 80, GREEN_DIM, true, BG2);
+  int y = 38;
+  const int xl = 10, xr = 246;
+  kvAt(xl, y, "SSID", ni.ssid, GREEN);
+  net::ipToStr(ni.ip, b2);
+  kvAt(xr, y, "IP", b2, GREEN);
+  y += 12;
+  devices::macToStr(ni.bssid, buf);
+  kvAt(xl, y, "BSSID", buf);
+  net::ipToStr(ni.mask, b2);
+  kvAt(xr, y, "MASK", b2);
+  y += 12;
+  snprintf(buf, sizeof(buf), "%d dBm", ni.rssi);
+  kvAt(xl, y, "SIGNAL", buf, heat(rssiNorm(ni.rssi)));
+  wifiIcon(xl + 120, y + 9, heat(rssiNorm(ni.rssi)), rssiBars(ni.rssi));
+  net::ipToStr(ni.gateway, b2);
+  kvAt(xr, y, "GATEWAY", b2);
+  y += 12;
+  snprintf(buf, sizeof(buf), "%d (sniffer pinned)", ni.channel);
+  kvAt(xl, y, "CHANNEL", buf);
+  net::ipToStr(ni.dns, b2);
+  kvAt(xr, y, "DNS", b2);
+  y += 12;
+  const uint32_t up = (now - ni.connectedAt) / 1000;
+  snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", (unsigned long)(up / 3600), (unsigned long)(up / 60 % 60), (unsigned long)(up % 60));
+  kvAt(xl, y, "UPTIME", buf);
+  devices::macToStr(ni.mac, buf);
+  kvAt(xr, y, "MY MAC", buf);
+  y += 12;
+  if (ni.gatewayPingMs >= 0) snprintf(buf, sizeof(buf), "%d ms", ni.gatewayPingMs);
+  else strlcpy(buf, ni.gatewayPingMs == -2 ? "no reply" : "...", sizeof(buf));
+  kvAt(xl, y, "GW PING", buf, ni.gatewayPingMs < 0 ? DIM : ni.gatewayPingMs < 20 ? GREEN : ni.gatewayPingMs < 80 ? YELLOW : RED);
+
+  buildLanList();
+  int nHosts = 0;
+  for (int i = 0; i < s_lanN; i++) nHosts += s_lan[i].host >= 0;
+  snprintf(buf, sizeof(buf), "%d on LAN, %d wireless heard", nHosts, s_rfClients);
+  kvAt(xr, y, "DEVICES", buf, CYAN);
+
+  // List header
+  const int sp = net::sweepProgress();
+  snprintf(buf, sizeof(buf), "CONNECTED DEVICES (%d)", s_lanN);
+  neonText(buf, 8, 118, CYAN, &fonts::Font2, textdatum_t::top_left, 0);
+  if (sp < 100) {
+    snprintf(buf, sizeof(buf), "ARP SWEEP %d%%", sp);
+    text(buf, 470, 121, YELLOW, &fonts::Font0, textdatum_t::top_right);
+    g.drawRect(300, 131, 170, 3, DARK);
+    g.fillRect(300, 131, 170 * sp / 100, 3, YELLOW);
+  } else {
+    text("tap a device for details", 470, 122, DIM, &fonts::Font0, textdatum_t::top_right);
+  }
+
+  s_netListY = 136;
+  s_netListH = 156;
+  const int maxScroll = max(0, s_lanN * kHostRowH - s_netListH);
+  s_netScroll = constrain(s_netScroll, 0, maxScroll);
+  g.setClipRect(0, s_netListY, SCREEN_W, s_netListH);
+  for (int i = s_netScroll / kHostRowH; i < s_lanN; i++) {
+    const int ry = s_netListY + i * kHostRowH - s_netScroll;
+    if (ry >= s_netListY + s_netListH) break;
+    drawHostRow(ry, s_lan[i], i);
+    const int sel = s_lan[i].host >= 0 ? s_lan[i].host : -(s_lan[i].dev + 2);
+    addHit(0, max(ry, s_netListY), 472, kHostRowH, H_HOSTROW, sel);
+  }
+  g.clearClipRect();
+  if (maxScroll > 0) {
+    const int bh = max(14, s_netListH * s_netListH / (s_lanN * kHostRowH));
+    const int by = s_netListY + (s_netListH - bh) * s_netScroll / maxScroll;
+    g.fillRect(474, by, 5, bh, CYAN);
+  }
+
+  button(4, 297, 112, 21, "RESCAN", sp < 100, CYAN, H_RESCAN);
+  button(122, 297, 112, 21, "DISCONNECT", false, RED, H_DISCONNECT);
+  button(240, 297, 112, 21, "FORGET NET", false, ORANGE, H_FORGET);
+  button(358, 297, 118, 21, net::autoConnect() ? "AUTO-JOIN: ON" : "AUTO-JOIN: OFF", net::autoConnect(), YELLOW, H_NETAUTO);
+}
+
+void drawNet() {
+  if (net::state() == net::NET_CONNECTED) drawNetOnline();
+  else drawNetOffline();
+}
+
+// Host detail
+void drawHost() {
+  const net::Info& ni = net::info();
+  const net::Host* h = s_hostSel >= 0 ? &net::host(s_hostSel) : nullptr;
+  const int devIdx = h ? devices::find(h->mac, true) : -(s_hostSel + 2);
+  const Device* d = (devIdx >= 0 && devices::at(devIdx).used) ? &devices::at(devIdx) : nullptr;
+  if ((h && !h->used) || (!h && !d) || net::state() != net::NET_CONNECTED) {
+    s_screen = SCR_NET;
+    return;
+  }
+  char buf[64], title[40], mac[18];
+  if (h) net::ipToStr(h->ip, buf);
+  else strlcpy(buf, "RF CLIENT", sizeof(buf));
+  snprintf(title, sizeof(title), "HOST // %s", buf);
+  netHeader(title, CYAN);
+
+  const uint8_t* m = h ? h->mac : d->mac;
+  devices::macToStr(m, mac);
+  cutRect(4, 34, 260, 258, CYAN_DIM, true, BG2);
+  int y = 42;
+  const int x = 12;
+  auto row = [&](const char* k, const char* v, uint16_t c = TEXT) {
+    text(k, x, y, DIM, &fonts::Font0);
+    text(v, x + 62, y, c, &fonts::Font0);
+    y += 14;
+  };
+  const char* role = !h ? "wireless client (sniffed)" : h->ip == ni.gateway ? "gateway / router" : h->ip == ni.ip ? "this device" : "LAN host";
+  row("ROLE", role, h && h->ip == ni.gateway ? MAGENTA : CYAN);
+  if (h) {
+    net::ipToStr(h->ip, buf);
+    row("IP", buf, GREEN);
+  }
+  snprintf(buf, sizeof(buf), "%s%s", mac, (m[0] & 2) ? "  RANDOM" : "");
+  row("MAC", buf);
+  const char* vend = signatures::ouiVendor(m);
+  row("VENDOR", vend ? vend : (m[0] & 2) ? "private (randomised)" : "unknown", vend ? TEXT : DIM);
+  row("NAME", h && h->name[0] ? h->name : "-", CYAN);
+  row("MDNS", h && h->services[0] ? h->services : "-");
+  if (h) {
+    char a1[8], a2[8];
+    ageStr(millis() - h->firstSeen, a1, sizeof(a1));
+    ageStr(millis() - h->lastSeen, a2, sizeof(a2));
+    snprintf(buf, sizeof(buf), "first %s ago, last %s", a1, a2);
+    row("SEEN", buf);
+  }
+  y += 6;
+  g.drawFastHLine(x, y - 4, 244, DARK);
+  if (d) {
+    const uint16_t c = devices::categoryColor(d->category);
+    snprintf(buf, sizeof(buf), "%d dBm (peak %d)", (int)roundf(d->rssiFast), d->rssiMax);
+    row("RF SIG", buf, heat(rssiNorm(d->rssiFast)));
+    row("RF TYPE", devices::categoryName(d->category), c);
+    if (d->reason[0]) row("MATCH", d->reason, c);
+    snprintf(buf, sizeof(buf), "%lu frames sniffed", (unsigned long)d->packets);
+    row("RF PKTS", buf);
+  } else {
+    row("RF", "not heard over the air", DIM);
+    text("(wired, or idle since boot)", x + 62, y, DARK, &fonts::Font0);
+  }
+
+  // Ports panel
+  cutRect(270, 34, 206, 258, YELLOW, false);
+  text("OPEN TCP PORTS", 280, 42, YELLOW, &fonts::Font2);
+  if (h) {
+    if (h->portScan == 0) {
+      text("not probed yet", 280, 66, DIM, &fonts::Font0);
+      text("probes 17 common ports", 280, 80, DARK, &fonts::Font0);
+      text("(only on networks you own", 280, 92, DARK, &fonts::Font0);
+      text(" or may test)", 280, 104, DARK, &fonts::Font0);
+    } else {
+      int py = 66;
+      for (int i = 0; i < h->nPorts && py < 236; i++, py += 14) {
+        snprintf(buf, sizeof(buf), "%5u/tcp  %s", h->ports[i], net::portName(h->ports[i]));
+        const bool cam = h->ports[i] == 554;
+        text(buf, 280, py, cam ? ORANGE : GREEN, &fonts::Font0);
+      }
+      if (h->portScan == 1) {
+        text((millis() / 300) & 1 ? "probing..." : "probing.. ", 280, py, YELLOW, &fonts::Font0);
+      } else if (!h->nPorts) {
+        text("none open (filtered)", 280, py, DIM, &fonts::Font0);
+      }
+    }
+    button(278, 240, 190, 22, h->portScan == 1 ? "PROBING..." : "PROBE PORTS", h->portScan == 1, YELLOW, H_PORTSCAN, s_hostSel);
+  } else {
+    text("no IP known: can't probe", 280, 66, DIM, &fonts::Font0);
+  }
+  if (d) button(278, 266, 190, 22, "TRACK RF SIGNAL >", false, RED, H_TRACKRF, devIdx);
+  footerTicker();
+}
+
+// On-screen keyboard
+const char* const kKeyRows[3][4] = {
+    {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm._@"},
+    {"1234567890", "QWERTYUIOP", "ASDFGHJKL-", "ZXCVBNM._@"},
+    {"!@#$%^&*()", "-_=+[]{}\\|", ";:'\",.<>/?", "`~12345678"},
+};
+
+void drawKeyboard() {
+  const bool pass = s_kbMode == KB_PASS;
+  char title[64];
+  if (pass) snprintf(title, sizeof(title), "PASSWORD // %s", s_kbSsid);
+  else strlcpy(title, "JOIN // ENTER SSID", sizeof(title));
+  netHeader(title, YELLOW);
+
+  // input field
+  cutRect(4, 34, 472, 34, YELLOW, true, BLACK);
+  char shown[66];
+  const size_t n = strlen(s_kbBuf);
+  for (size_t i = 0; i < n; i++) {
+    const bool reveal = !pass || s_kbShow || (i == n - 1 && millis() - s_kbLastKey < 1200);
+    shown[i] = reveal ? s_kbBuf[i] : '*';
+  }
+  shown[n] = 0;
+  g.setFont(&fonts::FreeMono12pt7b);
+  const char* vis = shown;
+  while (*vis && g.textWidth(vis) > 440) vis++;
+  text(vis, 14, 40, TEXT, &fonts::FreeMono12pt7b);
+  if ((millis() / 400) & 1) g.fillRect(16 + g.textWidth(vis), 42, 10, 20, YELLOW);
+  char cnt[24];
+  snprintf(cnt, sizeof(cnt), "%u chars", (unsigned)n);
+  text(cnt, 470, 58, DIM, &fonts::Font0, textdatum_t::top_right);
+
+  // keys
+  const int kw = 46, kh = 42, gx = 1, x0 = 5, y0 = 74;
+  for (int r = 0; r < 4; r++) {
+    const char* row = kKeyRows[s_kbLayer][r];
+    for (int c = 0; c < 10; c++) {
+      const int x = x0 + c * (kw + gx), y = y0 + r * (kh + 2);
+      cutRect(x, y, kw, kh, CYAN_DIM, true, PANEL);
+      char k[2] = {row[c], 0};
+      text(k, x + kw / 2, y + kh / 2, CYAN, &fonts::FreeMonoBold12pt7b, textdatum_t::middle_center);
+      addHit(x, y, kw + gx, kh + 2, H_KEY, (uint8_t)row[c]);
+    }
+  }
+  const int fy = 252;
+  button(5, fy, 70, 40, s_kbLayer == 1 ? "abc" : "SHIFT", s_kbLayer == 1, CYAN, H_KSHIFT);
+  button(78, fy, 70, 40, s_kbLayer == 2 ? "abc" : "#+=", s_kbLayer == 2, CYAN, H_KSYM);
+  button(151, fy, 196, 40, "SPACE", false, CYAN, H_KSPACE);
+  button(350, fy, 125, 40, "DEL <", false, ORANGE, H_KDEL);
+
+  if (pass) button(5, 297, 110, 21, s_kbShow ? "HIDE" : "SHOW", s_kbShow, CYAN, H_KSHOW);
+  button(121, 297, 110, 21, "CANCEL", false, RED, H_KCANCEL);
+  const bool okEnabled = pass ? (n == 0 || n >= 8) : n > 0;
+  button(237, 297, 238, 21, pass ? (n == 0 ? "JOIN (OPEN)" : okEnabled ? "CONNECT >" : "WPA needs 8+ chars") : "NEXT >",
+         okEnabled, GREEN, okEnabled ? H_KOK : H_NONE);
+}
+
+void keyboardTap(uint8_t id, int arg) {
+  const size_t n = strlen(s_kbBuf);
+  switch (id) {
+    case H_KEY:
+      if (n < 64) {
+        s_kbBuf[n] = (char)arg;
+        s_kbBuf[n + 1] = 0;
+        s_kbLastKey = millis();
+        if (s_kbLayer == 1) s_kbLayer = 0;  // one-shot shift
+      }
+      break;
+    case H_KSPACE:
+      if (n < 64) {
+        s_kbBuf[n] = ' ';
+        s_kbBuf[n + 1] = 0;
+      }
+      break;
+    case H_KDEL:
+      if (n) s_kbBuf[n - 1] = 0;
+      break;
+    case H_KSHIFT:
+      s_kbLayer = s_kbLayer == 1 ? 0 : 1;
+      break;
+    case H_KSYM:
+      s_kbLayer = s_kbLayer == 2 ? 0 : 2;
+      break;
+    case H_KSHOW:
+      s_kbShow = !s_kbShow;
+      break;
+    case H_KCANCEL:
+      s_screen = SCR_NET;
+      break;
+    case H_KOK:
+      if (s_kbMode == KB_SSID) {
+        char ssid[33];
+        strlcpy(ssid, s_kbBuf, sizeof(ssid));
+        openKeyboard(KB_PASS, ssid, 0, nullptr);
+      } else {
+        net::connect(s_kbSsid, s_kbBuf, s_kbCh, s_kbBssid, true);
+        memset(s_kbBuf, 0, sizeof(s_kbBuf));
+        s_screen = SCR_NET;
+      }
+      break;
+  }
+}
+
 // ---------------- BOOT ----------------
 void drawBoot() {
   background();
@@ -822,6 +1413,10 @@ void onTap(int x, int y) {
     const Hit& h = s_hits[i];
     if (x < h.x || y < h.y || x >= h.x + h.w || y >= h.y + h.h) continue;
     audio::blip();
+    if (s_screen == SCR_KEYB && h.id >= H_KEY) {
+      keyboardTap(h.id, h.arg);
+      return;
+    }
     switch (h.id) {
       case H_FILTER:
         s_filter = (devices::Filter)h.arg;
@@ -840,6 +1435,7 @@ void onTap(int x, int y) {
         break;
       case H_BACK:
         if (s_screen == SCR_DETAIL) closeDetail();
+        else if (s_screen == SCR_HOST || s_screen == SCR_KEYB) s_screen = SCR_NET;
         else s_screen = SCR_LIST;
         led::setHeat(-1);
         break;
@@ -871,6 +1467,42 @@ void onTap(int x, int y) {
         radio::lockChannel(h.arg);
         s_userLock = true;
         break;
+      case H_NET:
+        s_screen = SCR_NET;
+        s_netScroll = 0;
+        break;
+      case H_NETAP:
+        pickAp(h.arg);
+        break;
+      case H_NETOTHER:
+        openKeyboard(KB_SSID, nullptr, 0, nullptr);
+        break;
+      case H_NETAUTO:
+        net::setAutoConnect(!net::autoConnect());
+        break;
+      case H_DISCONNECT:
+        net::disconnect();
+        break;
+      case H_FORGET: {
+        char ssid[33];
+        strlcpy(ssid, net::info().ssid, sizeof(ssid));
+        net::disconnect();
+        net::forget(ssid);
+        break;
+      }
+      case H_RESCAN:
+        net::rescan();
+        break;
+      case H_HOSTROW:
+        s_hostSel = h.arg;
+        s_screen = SCR_HOST;
+        break;
+      case H_PORTSCAN:
+        net::probePorts(h.arg);
+        break;
+      case H_TRACKRF:
+        openDetail(h.arg);
+        break;
       case H_WIFI:
         radio::setWifiEnabled(!radio::wifiEnabled());
         break;
@@ -886,12 +1518,13 @@ void handleTouch(const touch::State& t) {
   if (t.down && !s_wasDown) {
     s_downX = t.x;
     s_downY = t.y;
-    s_downScroll = s_scroll;
+    s_downScroll = s_screen == SCR_NET ? s_netScroll : s_scroll;
     s_dragging = false;
   } else if (t.down && s_wasDown) {
     const int dy = t.y - s_downY;
     if (!s_dragging && (abs(dy) > 10 || abs(t.x - s_downX) > 10)) s_dragging = true;
     if (s_dragging && s_screen == SCR_LIST && s_downY >= kListY) s_scroll = s_downScroll - dy;
+    if (s_dragging && s_screen == SCR_NET && s_downY >= s_netListY) s_netScroll = s_downScroll - dy;
   } else if (!t.down && s_wasDown) {
     if (!s_dragging) onTap(s_downX, s_downY);
   }
@@ -971,6 +1604,7 @@ void frame(const touch::State& t, bool backButton) {
 
   if (backButton && s_screen != SCR_LIST) {
     if (s_screen == SCR_DETAIL) closeDetail();
+    else if (s_screen == SCR_HOST || s_screen == SCR_KEYB) s_screen = SCR_NET;
     else s_screen = SCR_LIST;
     led::setHeat(-1);
   }
@@ -1001,6 +1635,15 @@ void frame(const touch::State& t, bool backButton) {
       break;
     case SCR_DETAIL:
       drawDetail();
+      break;
+    case SCR_NET:
+      drawNet();
+      break;
+    case SCR_KEYB:
+      drawKeyboard();
+      break;
+    case SCR_HOST:
+      drawHost();
       break;
     case SCR_SPECTRUM:
       drawSpectrum();

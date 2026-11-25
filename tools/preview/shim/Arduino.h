@@ -8,6 +8,7 @@
 #include <math.h>
 #include <algorithm>
 #include <string>
+#include <arpa/inet.h>
 using std::min; using std::max;
 #define constrain(x, lo, hi) ((x) < (lo) ? (lo) : ((x) > (hi) ? (hi) : (x)))
 #define IRAM_ATTR

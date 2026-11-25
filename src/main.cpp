@@ -14,6 +14,7 @@
 #include "devices.h"
 #include "display.h"
 #include "led.h"
+#include "net.h"
 #include "radio.h"
 #include "touch.h"
 #include "ui.h"
@@ -54,8 +55,10 @@ void setup() {
 
   ui::bootLine("> wifi promiscuous 2.4ghz + ble observer", 0);
   ui::bootLine("> wifi promiscuous 2.4ghz + ble observer", radio::begin() ? 1 : -1);
+  net::begin();
+  ui::bootLine("> uplink manager (saved networks)", 1);
   ui::bootLine("> signature db: drones cams flock tags", 1);
-  ui::bootLine("> rx only. no packets transmitted.", 1);
+  ui::bootLine("> rx only until you join a network", 1);
   ui::bootLine("> jacking in...", 0);
   delay(300);
   ui::bootDone();
@@ -81,6 +84,7 @@ void loop() {
 
   led::update();
   battery::update();
+  net::update();
 
   if (now - s_lastFrame >= 1000 / TARGET_FPS) {
     s_lastFrame = now;

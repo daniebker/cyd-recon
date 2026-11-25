@@ -10,6 +10,7 @@ volatile radio::ChannelStats s_ch[WIFI_MAX_CH + 1];
 volatile uint32_t s_wifiPkts = 0, s_blePkts = 0, s_dropped = 0;
 volatile uint8_t s_channel = 1;
 uint8_t s_lockedCh = 0;
+uint8_t s_stationCh = 0;  // set while we're associated: radio must stay put
 bool s_wifiOn = true, s_bleOn = true;
 uint32_t s_lastHop = 0;
 
@@ -194,6 +195,7 @@ void wifiRx(void* buf, wifi_promiscuous_pkt_type_t type) {
     const bool toDS = f[1] & 0x01, fromDS = f[1] & 0x02;
     if (toDS && fromDS) return;  // WDS, skip
     o.medium = fromDS ? MED_WIFI_AP : MED_WIFI_STA;
+    if (toDS) memcpy(o.bssid, f + 4, 6);  // STA -> AP: addr1 is the BSSID
     push(o);
   }
 }
@@ -292,6 +294,10 @@ void update() {
     if (!s_bleOn && scan->isScanning()) scan->stop();
   }
   if (!s_wifiOn) return;
+  if (s_stationCh) {
+    s_channel = s_stationCh;  // the WiFi driver owns the channel now
+    return;
+  }
   if (s_lockedCh) {
     if (s_channel != s_lockedCh) setChannel(s_lockedCh);
     return;
@@ -310,10 +316,13 @@ bool poll(Obs& out) { return s_queue && xQueueReceive(s_queue, &out, 0) == pdTRU
 
 void lockChannel(uint8_t ch) {
   s_lockedCh = ch <= WIFI_MAX_CH ? ch : 0;
-  if (s_lockedCh && s_wifiOn) setChannel(s_lockedCh);
+  if (s_lockedCh && s_wifiOn && !s_stationCh) setChannel(s_lockedCh);
 }
 uint8_t channel() { return s_channel; }
-bool hopping() { return s_lockedCh == 0; }
+bool hopping() { return s_lockedCh == 0 && s_stationCh == 0; }
+void setStationChannel(uint8_t ch) { s_stationCh = ch; if (ch) s_channel = ch; }
+uint8_t stationChannel() { return s_stationCh; }
+void setPromiscuous(bool on) { esp_wifi_set_promiscuous(on && s_wifiOn); }
 
 void setWifiEnabled(bool on) {
   s_wifiOn = on;

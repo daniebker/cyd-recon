@@ -47,6 +47,7 @@ struct Obs {
   char name[33];     // SSID / BLE local name / probed SSID
   uint8_t adv[31];
   uint8_t advLen;
+  uint8_t bssid[6];  // wifi client: AP it was talking to (zero if unknown)
   RemoteId rid;
 };
 enum : uint8_t {
@@ -82,6 +83,7 @@ struct Device {
   uint16_t company;      // BLE company id, 0xFFFF none
   uint8_t adv[31];
   uint8_t advLen;
+  uint8_t bssid[6];      // wifi client: associated AP (from data frames)
   RemoteId rid;
   bool alerted;
 };
@@ -104,6 +106,8 @@ int countFlagged();
 enum Filter : uint8_t { F_ALL = 0, F_FLAGGED, F_WIFI, F_BLE, F_COUNT };
 enum Sort : uint8_t { S_SIGNAL = 0, S_RECENT, S_THREAT, S_COUNT };
 int list(Filter f, Sort s, int* out, int maxOut);
+// Find a device by MAC (any medium if wifiOnly=false). -1 if not found.
+int find(const uint8_t* mac, bool wifiOnly);
 
 // Newly flagged devices that haven't been announced yet (-1 if none)
 int popAlert();

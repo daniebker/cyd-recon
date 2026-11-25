@@ -8,6 +8,9 @@ namespace signatures {
 // (Re)classify a device in place: sets category, confidence, label, vendor, reason.
 void classify(Device& d);
 
+// MAC OUI -> vendor name (nullptr if unknown / randomised)
+const char* ouiVendor(const uint8_t* mac);
+
 // BLE company id -> name (nullptr if unknown)
 const char* companyName(uint16_t id);
 
