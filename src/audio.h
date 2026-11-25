@@ -8,7 +8,7 @@ namespace audio {
 bool begin();               // Wire must already be started
 void setEnabled(bool on);
 bool enabled();
-void setVolume(uint8_t v);  // 0..100
+void setVolume(uint8_t v);  // 0..100 (0 = mute)
 
 void blip();                // short UI click
 void alert();               // new-threat chirp

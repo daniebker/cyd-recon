@@ -5,6 +5,7 @@ namespace {
 uint32_t s_flashUntil = 0;
 uint8_t s_fr = 0, s_fg = 0, s_fb = 0;
 float s_heat = -1;
+bool s_ambient = true;
 uint32_t s_last = 0;
 uint8_t s_cr = 255, s_cg = 255, s_cb = 255;
 
@@ -29,6 +30,7 @@ void flash(uint16_t c) {
 }
 
 void setHeat(float h) { s_heat = h; }
+void setAmbient(bool on) { s_ambient = on; }
 
 void update() {
   const uint32_t now = millis();
@@ -37,6 +39,8 @@ void update() {
   if (now < s_flashUntil) {
     const bool on = (now / 100) & 1;
     out(on ? s_fr / 3 : 0, on ? s_fg / 3 : 0, on ? s_fb / 3 : 0);
+  } else if (!s_ambient) {
+    out(0, 0, 0);
   } else if (s_heat >= 0) {
     // blue (cold) -> red (hot), pulse faster when hot
     const float h = constrain(s_heat, 0.f, 1.f);

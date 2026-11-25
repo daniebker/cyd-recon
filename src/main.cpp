@@ -16,6 +16,7 @@
 #include "led.h"
 #include "net.h"
 #include "radio.h"
+#include "settings.h"
 #include "touch.h"
 #include "ui.h"
 
@@ -54,6 +55,8 @@ void setup() {
 
   ui::bootLine("> es8311 audio codec", 0);
   ui::bootLine("> es8311 audio codec", audio::begin() ? 1 : -1);
+  settings::begin();  // volume, brightness, LED, alert prefs from NVS
+  ui::bootLine("> user settings (nvs)", 1);
 
   ui::bootLine("> wifi promiscuous 2.4ghz + ble observer", 0);
   ui::bootLine("> wifi promiscuous 2.4ghz + ble observer", radio::begin() ? 1 : -1);
@@ -87,6 +90,7 @@ void loop() {
   led::update();
   battery::update();
   net::update();
+  settings::update();
 
   if (now - s_lastFrame >= 1000 / TARGET_FPS) {
     s_lastFrame = now;

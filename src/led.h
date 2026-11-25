@@ -8,5 +8,6 @@ void begin();
 void update();                // call from main loop
 void flash(uint16_t color565);// alert flash burst
 void setHeat(float h);        // 0..1 tracking proximity, <0 = idle
+void setAmbient(bool on);     // false = LED dark except alert flashes
 
 }  // namespace led

@@ -10,6 +10,7 @@
 #include "led.h"
 #include "net.h"
 #include "radio.h"
+#include "settings.h"
 #include "signatures.h"
 #include "theme.h"
 
@@ -19,7 +20,7 @@ namespace {
 
 LGFX_Sprite g;  // 480x320 frame buffer in PSRAM
 
-enum Screen : uint8_t { SCR_BOOT, SCR_LIST, SCR_DETAIL, SCR_SPECTRUM, SCR_NET, SCR_KEYB, SCR_HOST, SCR_TOUCH };
+enum Screen : uint8_t { SCR_BOOT, SCR_LIST, SCR_DETAIL, SCR_SPECTRUM, SCR_NET, SCR_KEYB, SCR_HOST, SCR_TOUCH, SCR_SETTINGS };
 Screen s_screen = SCR_BOOT;
 Screen s_detailReturn = SCR_LIST;  // where BACK goes from the tracker
 
@@ -58,6 +59,13 @@ enum HitId : uint8_t {
   H_KSHOW,
   H_KCANCEL,
   H_KOK,
+  H_GEIGER,
+  H_SETTINGS,
+  H_TOGGLE,
+  H_SLIDER,
+  H_STEP,
+  H_TESTALERT,
+  H_RESETCFG,
 };
 struct Hit {
   int16_t x, y, w, h;
@@ -257,9 +265,12 @@ int s_batWarnLevel = 0;
 void checkBatteryWarning() {
   const int lvl = battery::critical() ? 2 : battery::low() ? 1 : 0;
   if (lvl > s_batWarnLevel) {
-    s_batWarnUntil = millis() + 5000;
-    audio::alert();
-    led::flash(RED);
+    const Config& cfg = settings::get();
+    if (cfg.batteryWarn) {
+      s_batWarnUntil = millis() + 5000;
+      if (cfg.alertSound) audio::alert();
+      if (cfg.alertLed) led::flash(RED);
+    }
     logEvent("!! battery %s %d%% (%.2fV)", lvl == 2 ? "CRITICAL" : "low", battery::percent(), battery::volts());
   }
   // Re-arm once charged back up
@@ -276,6 +287,12 @@ void drawBatteryWarning() {
   char buf[48];
   snprintf(buf, sizeof(buf), "!! %s BATTERY  %d%%  %.2fV", crit ? "CRITICAL" : "LOW", battery::percent(), battery::volts());
   neonText(buf, x + w / 2, y + h / 2, crit ? RED : ORANGE, &fonts::Font2, textdatum_t::middle_center, 1);
+}
+
+void gearIcon(int cx, int cy, uint16_t c) {
+  for (int a = 0; a < 360; a += 45) g.fillArc(cx, cy, 7, 4, a - 13, a + 13, c);
+  g.fillCircle(cx, cy, 5, c);
+  g.fillCircle(cx, cy, 2, PANEL);
 }
 
 void wifiIcon(int x, int y, uint16_t c, int bars) {
@@ -448,8 +465,10 @@ void drawList() {
   for (int i = 0; i < 4; i++) {
     if (i == 1) snprintf(lab, sizeof(lab), "ALERT %d", devices::countFlagged());
     else snprintf(lab, sizeof(lab), "%s", kTabs[i]);
-    button(4 + i * 67, 33, 64, 20, lab, s_filter == i, i == 1 ? MAGENTA : CYAN, H_FILTER, i);
+    button(4 + i * 61, 33, 58, 20, lab, s_filter == i, i == 1 ? MAGENTA : CYAN, H_FILTER, i);
   }
+  button(248, 33, 21, 20, "", false, YELLOW, H_SETTINGS);
+  gearIcon(258, 43, YELLOW);
   static const char* kSort[] = {"SORT:SIGNAL", "SORT:NEWEST", "SORT:THREAT"};
   button(272, 33, 76, 20, kSort[s_sort], false, YELLOW, H_SORT);
   button(351, 33, 56, 20, "RF SCOPE", false, GREEN, H_SPECTRUM);
@@ -733,8 +752,9 @@ void drawDetail() {
   drawGraph(4, 234, 472, 58);
 
   // Footer controls
-  const bool snd = audio::enabled();
-  button(4, 297, 112, 21, snd ? "GEIGER: ON" : "GEIGER: OFF", snd, GREEN, H_SOUND);
+  const Config& cfg = settings::get();
+  const bool snd = cfg.sound && cfg.geiger;
+  button(4, 297, 112, 21, snd ? "GEIGER: ON" : "GEIGER: OFF", snd, GREEN, H_GEIGER);
   if (d.medium != MED_BLE) {
     char lb[24];
     snprintf(lb, sizeof(lb), radio::hopping() ? "CH LOCK: OFF" : "CH LOCK: %d", radio::channel());
@@ -748,7 +768,7 @@ void drawDetail() {
   // Geiger + LED follow the target
   if (live) {
     const float s = rssiNorm(d.rssiFast);
-    audio::setGeiger(s);
+    audio::setGeiger(cfg.geiger ? s : -1);
     led::setHeat(s);
   } else {
     audio::setGeiger(-1);
@@ -1369,6 +1389,128 @@ void keyboardTap(uint8_t id, int arg) {
   }
 }
 
+// ---------------- SETTINGS ----------------
+enum CfgToggle : uint8_t { T_SOUND, T_CLICKS, T_GEIGER, T_ASOUND, T_APOPUP, T_ALED, T_BATWARN, T_STATUSLED, T_COUNT };
+enum CfgSlider : uint8_t { SL_VOLUME, SL_BRIGHT };
+
+bool* toggleField(int t) {
+  Config& c = settings::get();
+  switch (t) {
+    case T_SOUND: return &c.sound;
+    case T_CLICKS: return &c.clicks;
+    case T_GEIGER: return &c.geiger;
+    case T_ASOUND: return &c.alertSound;
+    case T_APOPUP: return &c.alertPopup;
+    case T_ALED: return &c.alertLed;
+    case T_BATWARN: return &c.batteryWarn;
+    case T_STATUSLED: return &c.statusLed;
+  }
+  return nullptr;
+}
+
+void setSlider(int which, int v) {
+  Config& c = settings::get();
+  v = constrain(v, 0, 100);
+  if (which == SL_VOLUME) {
+    if (c.volume == v) return;
+    c.volume = (uint8_t)v;
+  } else {
+    v = max<int>(v, settings::MIN_BRIGHTNESS);
+    if (c.brightness == v) return;
+    c.brightness = (uint8_t)v;
+  }
+  settings::changed();
+}
+
+// Active slider drag (-1 = none)
+int s_slider = -1;
+int16_t s_sliderX = 0, s_sliderW = 1;
+
+// Label on the left, ON/OFF switch on the right; whole row is the hit target
+void toggleRow(int x, int y, int w, const char* label, const char* sub, int which, uint16_t c, bool dim = false) {
+  const bool on = *toggleField(which);
+  const uint16_t lc = dim ? DIM : TEXT;
+  text(label, x, y + (sub ? 1 : 6), lc, &fonts::Font2);
+  if (sub) text(sub, x, y + 17, dim ? DARK : DIM, &fonts::Font0);
+  const int sw = 48, sh = 18, sx = x + w - sw, sy = y + 4;
+  const uint16_t sc = dim ? lerp565(BG, c, 0.4f) : c;
+  cutRect(sx, sy, sw, sh, on ? sc : DARK, true, on ? sc : PANEL);
+  // knob
+  const int kx = on ? sx + sw - 14 : sx + 4;
+  g.fillRect(kx, sy + 4, 10, sh - 8, on ? BLACK : DIM);
+  text(on ? "ON" : "OFF", on ? sx + 16 : sx + sw - 16, sy + sh / 2 + 1, on ? BLACK : DIM, &fonts::Font0,
+       textdatum_t::middle_center);
+  addHit(x - 4, y, w + 8, 26, H_TOGGLE, which);
+}
+
+// Segmented bar with -/+ steppers. Tap or drag the bar to set it.
+void sliderRow(int x, int y, int w, int value, int which, uint16_t c, bool dim = false) {
+  const int bh = 22, bw = 26;
+  button(x, y, bw, bh, "-", false, dim ? DIM : c, H_STEP, which * 2);
+  button(x + w - bw, y, bw, bh, "+", false, dim ? DIM : c, H_STEP, which * 2 + 1);
+  const int tx = x + bw + 6, tw = w - 2 * bw - 12;
+  const int segW = 6, n = tw / segW;
+  const int lit = (value * n + 50) / 100;
+  const uint16_t lo = lerp565(BG, c, 0.35f);
+  for (int i = 0; i < n; i++) {
+    const int sh = 6 + (bh - 8) * i / max(1, n - 1);  // ramp up like a volume wedge
+    const uint16_t col = i < lit ? (dim ? DIM : lerp565(lo, c, (float)i / n)) : DARK;
+    g.fillRect(tx + i * segW, y + bh - 1 - sh, segW - 2, sh, col);
+  }
+  if (s_slider == which) g.drawRect(tx - 3, y - 2, tw + 4, bh + 4, c);
+  addHit(tx - 3, y - 4, tw + 6, bh + 8, H_SLIDER, which);
+}
+
+void panelTitle(int x, int y, const char* t, uint16_t c) {
+  neonText(t, x, y, c, &fonts::Font2, textdatum_t::top_left, 0);
+}
+
+void drawSettings() {
+  const Config& c = settings::get();
+  netHeader("SYSTEM // SETTINGS", YELLOW);
+  char buf[48];
+
+  // AUDIO
+  cutRect(4, 34, 234, 150, GREEN_DIM, true, BG2);
+  panelTitle(12, 38, "AUDIO", GREEN);
+  toggleRow(12, 58, 218, "SOUND", "master speaker", T_SOUND, GREEN);
+  const bool mute = !c.sound;
+  snprintf(buf, sizeof(buf), c.volume ? "%d%%" : "MUTE", c.volume);
+  text("VOLUME", 12, 88, mute ? DIM : TEXT, &fonts::Font2);
+  text(buf, 230, 90, mute ? DIM : GREEN, &fonts::Font2, textdatum_t::top_right);
+  sliderRow(12, 104, 218, c.volume, SL_VOLUME, GREEN, mute);
+  toggleRow(12, 130, 218, "TOUCH CLICKS", nullptr, T_CLICKS, GREEN, mute);
+  toggleRow(12, 156, 218, "TRACKER GEIGER", nullptr, T_GEIGER, GREEN, mute);
+
+  // ALERTS
+  cutRect(242, 34, 234, 150, MAGENTA_DIM, true, BG2);
+  panelTitle(250, 38, "ALERTS", MAGENTA);
+  text("on new threat", 468, 42, DIM, &fonts::Font0, textdatum_t::top_right);
+  toggleRow(250, 58, 218, "ALERT CHIRP", nullptr, T_ASOUND, MAGENTA, mute);
+  toggleRow(250, 84, 218, "POP-UP BANNER", nullptr, T_APOPUP, MAGENTA);
+  toggleRow(250, 110, 218, "LED FLASH", nullptr, T_ALED, MAGENTA);
+  toggleRow(250, 136, 218, "BATTERY WARN", "15% / 5% banner", T_BATWARN, ORANGE);
+  if (mute) text("chirp needs SOUND on", 250, 168, DARK, &fonts::Font0);
+
+  // DISPLAY
+  cutRect(4, 188, 472, 104, CYAN_DIM, true, BG2);
+  panelTitle(12, 192, "DISPLAY + LED", CYAN);
+  text("BRIGHTNESS", 12, 214, TEXT, &fonts::Font2);
+  snprintf(buf, sizeof(buf), "%d%%", c.brightness);
+  text(buf, 468, 216, CYAN, &fonts::Font2, textdatum_t::top_right);
+  sliderRow(12, 232, 456, c.brightness, SL_BRIGHT, CYAN);
+  toggleRow(12, 262, 218, "STATUS LED", "idle glow + tracker heat", T_STATUSLED, CYAN);
+  // Save state
+  const bool pending = settings::dirty();
+  text(pending ? "saving..." : "saved to flash", 468, 268, pending ? YELLOW : GREEN_DIM, &fonts::Font0,
+       textdatum_t::top_right);
+  text(FW_NAME " v" FW_VERSION, 468, 280, DARK, &fonts::Font0, textdatum_t::top_right);
+
+  button(4, 297, 130, 21, "TEST ALERT", false, MAGENTA, H_TESTALERT);
+  text("hold BOOT 1s: touch test", 240, 307, DARK, &fonts::Font0, textdatum_t::middle_center);
+  button(346, 297, 130, 21, "RESET DEFAULTS", false, RED, H_RESETCFG);
+}
+
 // ---------------- TOUCH TEST ----------------
 struct TrailPt {
   int16_t x, y;
@@ -1486,7 +1628,7 @@ void onTap(int x, int y) {
   for (int i = s_nhits - 1; i >= 0; i--) {  // topmost (last drawn) first
     const Hit& h = s_hits[i];
     if (x < h.x || y < h.y || x >= h.x + h.w || y >= h.y + h.h) continue;
-    audio::blip();
+    if (settings::get().clicks) audio::blip();
     if (s_screen == SCR_KEYB && h.id >= H_KEY) {
       keyboardTap(h.id, h.arg);
       return;
@@ -1514,7 +1656,53 @@ void onTap(int x, int y) {
         led::setHeat(-1);
         break;
       case H_SOUND:
-        audio::setEnabled(!audio::enabled());
+        settings::get().sound = !settings::get().sound;
+        settings::changed();
+        break;
+      case H_GEIGER: {
+        Config& c = settings::get();
+        if (c.sound && c.geiger) {
+          c.geiger = false;
+        } else {
+          c.geiger = true;
+          c.sound = true;  // turning the ticker on implies you want to hear it
+        }
+        settings::changed();
+        break;
+      }
+      case H_SETTINGS:
+        s_screen = SCR_SETTINGS;
+        break;
+      case H_TOGGLE: {
+        bool* f = toggleField(h.arg);
+        if (f) {
+          *f = !*f;
+          settings::changed();
+        }
+        break;
+      }
+      case H_SLIDER:  // plain tap (drags are handled in handleTouch)
+        setSlider(h.arg, (x - h.x - 3) * 100 / max(1, h.w - 6));
+        if (h.arg == SL_VOLUME && !settings::get().clicks) audio::blip();
+        break;
+      case H_STEP: {
+        const int which = h.arg / 2;
+        const int cur = which == SL_VOLUME ? settings::get().volume : settings::get().brightness;
+        setSlider(which, (cur / 5) * 5 + ((h.arg & 1) ? 5 : (cur % 5 ? 0 : -5)));
+        if (which == SL_VOLUME && !settings::get().clicks) audio::blip();  // hear the new level
+        break;
+      }
+      case H_TESTALERT: {
+        const Config& c = settings::get();
+        if (c.alertSound) audio::alert();
+        if (c.alertLed) led::flash(MAGENTA);
+        logEvent("test alert: chirp %s, led %s, popup %s", c.alertSound && c.sound ? "on" : "off",
+                 c.alertLed ? "on" : "off", c.alertPopup ? "on" : "off");
+        break;
+      }
+      case H_RESETCFG:
+        settings::reset();
+        logEvent("settings reset to defaults");
         break;
       case H_LOCK:
         if (radio::hopping()) {
@@ -1594,6 +1782,19 @@ void handleTouch(const touch::State& t) {
     s_downY = t.y;
     s_downScroll = s_screen == SCR_NET ? s_netScroll : s_scroll;
     s_dragging = false;
+    s_slider = -1;
+    if (s_screen == SCR_SETTINGS) {
+      for (int i = 0; i < s_nhits; i++) {
+        const Hit& h = s_hits[i];
+        if (h.id != H_SLIDER || t.x < h.x || t.y < h.y || t.x >= h.x + h.w || t.y >= h.y + h.h) continue;
+        s_slider = h.arg;
+        s_sliderX = h.x + 3;
+        s_sliderW = max(1, h.w - 6);
+      }
+    }
+  } else if (t.down && s_wasDown && s_slider >= 0) {
+    if (abs(t.x - s_downX) > 4) s_dragging = true;
+    if (s_dragging) setSlider(s_slider, (t.x - s_sliderX) * 100 / s_sliderW);
   } else if (t.down && s_wasDown) {
     const int dy = t.y - s_downY;
     if (!s_dragging && (abs(dy) > 10 || abs(t.x - s_downX) > 10)) s_dragging = true;
@@ -1601,6 +1802,8 @@ void handleTouch(const touch::State& t) {
     if (s_dragging && s_screen == SCR_NET && s_downY >= s_netListY) s_netScroll = s_downScroll - dy;
   } else if (!t.down && s_wasDown) {
     if (!s_dragging) onTap(s_downX, s_downY);
+    else if (s_slider == SL_VOLUME) audio::blip();  // preview the level you let go at
+    s_slider = -1;
   }
   s_wasDown = t.down;
 }
@@ -1701,12 +1904,13 @@ void frame(const touch::State& t, bool backButton) {
     devices::macToStr(d.mac, mac);
     logEvent("!! %s %s %s", d.label, d.name[0] ? d.name : mac, d.reason);
     Serial.printf("[ALERT] %s,%s,%s,%d,%s\n", devices::categoryName(d.category), d.label, mac, d.rssi, d.reason);
-    if (!(s_screen == SCR_DETAIL && s_sel == a)) {
+    const Config& cfg = settings::get();
+    if (cfg.alertPopup && !(s_screen == SCR_DETAIL && s_sel == a)) {
       s_toastIdx = a;
       s_toastUntil = millis() + 4500;
     }
-    audio::alert();
-    led::flash(devices::categoryColor(d.category));
+    if (cfg.alertSound) audio::alert();
+    if (cfg.alertLed) led::flash(devices::categoryColor(d.category));
   }
 
   checkBatteryWarning();
@@ -1735,6 +1939,9 @@ void frame(const touch::State& t, bool backButton) {
       break;
     case SCR_SPECTRUM:
       drawSpectrum();
+      break;
+    case SCR_SETTINGS:
+      drawSettings();
       break;
     default:
       break;

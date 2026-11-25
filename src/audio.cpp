@@ -176,8 +176,11 @@ void setEnabled(bool on) { s_enabled = on; }
 bool enabled() { return s_enabled; }
 
 void setVolume(uint8_t v) {
+  // DAC volume reg 0x32: 0.5 dB steps, 0xBF = 0 dB. Map 1..100 onto
+  // -35 dB..+6 dB (linear in dB, so the slider feels even); 0 = mute.
+  // 70 lands on 0xB2 (-6.5 dB), the level the firmware always shipped with.
   v = min<uint8_t>(v, 100);
-  wr(0x32, v == 0 ? 0 : (uint8_t)(v * 256 / 100 - 1));
+  wr(0x32, v == 0 ? 0 : (uint8_t)(0x79 + v * (0xCB - 0x79) / 100));
 }
 
 void blip() { s_blipReq = s_blipReq + 1; }

@@ -9,6 +9,7 @@
 #include "../../src/led.h"
 #include "../../src/net.h"
 #include "../../src/radio.h"
+#include "../../src/settings.h"
 #include "../../src/ui.h"
 
 SerialShim Serial;
@@ -61,6 +62,7 @@ void begin() {}
 void update() {}
 void flash(uint16_t) {}
 void setHeat(float) {}
+void setAmbient(bool) {}
 }  // namespace led
 namespace radio {
 static ChannelStats st[WIFI_MAX_CH + 1];
@@ -320,7 +322,7 @@ int main(int argc, char** argv) {
   snprintf(p, sizeof p, "%s/02_list.ppm", out);
   shot(p);
 
-  tap(39 + 4, 43);  // ALERTS tab
+  tap(4 + 61 + 20, 43);  // ALERTS tab
   snprintf(p, sizeof p, "%s/03_alerts.ppm", out);
   shot(p);
 
@@ -344,10 +346,10 @@ int main(int argc, char** argv) {
 
   // Track the Remote ID drone
   tap(0, 0);
-  for (int i = 0; i < 4; i++) tap(4 + i * 78 + 20, 43);  // cycle tabs, end on BLE
+  for (int i = 0; i < 4; i++) tap(4 + i * 61 + 20, 43);  // cycle tabs, end on BLE
   tap(4 + 20, 43);                                       // ALL
   // open detail via direct hit on first alerts row
-  tap(4 + 78 + 20, 43);  // ALERTS
+  tap(4 + 61 + 20, 43);  // ALERTS
   tap(200, 58 + 5);      // first row
   for (int t = 0; t < 140; t++) {
     populate(40 + t);
@@ -430,6 +432,16 @@ int main(int argc, char** argv) {
   tap(200, 136 + 28 * 2 + 5);  // a host row
   snprintf(p, sizeof p, "%s/14_host.ppm", out);
   shot(p);
+  tap(30, 14);  // back to NET
+  tap(30, 14);  // back to list
+
+  // settings: gear button on the list screen
+  tap(258, 43);
+  tap(12 + 26 + 6 + 120, 115);  // tap the volume bar
+  tap(250 + 100, 97);           // turn the pop-up banner off
+  snprintf(p, sizeof p, "%s/16_settings.ppm", out);
+  shot(p);
+  tap(30, 14);
 
   // touch test screen
   touch::dg.chip = touch::CHIP_ST_55;
