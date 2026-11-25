@@ -4,7 +4,7 @@
 // Sniffs 2.4 GHz WiFi management/data frames and BLE advertisements, flags
 // drones, cameras, surveillance gear, trackers and hacking tools, and lets you
 // tap a target to hunt it down with a hot/cold RSSI tracker.
-// Receive-only: it never transmits, associates, or connects to anything.
+// Receive-only until you join a network from the NETWORK screen.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -23,6 +23,8 @@ namespace {
 uint32_t s_lastFrame = 0;
 uint32_t s_lastExpire = 0;
 bool s_btnPrev = true;
+uint32_t s_btnDownAt = 0;
+bool s_btnLongFired = false;
 }  // namespace
 
 void setup() {
@@ -88,8 +90,18 @@ void loop() {
 
   if (now - s_lastFrame >= 1000 / TARGET_FPS) {
     s_lastFrame = now;
+    // BOOT button: short press = back, hold 1 s = touch test screen
     const bool btn = digitalRead(PIN_BOOT_BTN);
-    const bool backPressed = s_btnPrev && !btn;
+    bool backPressed = false;
+    if (!btn && s_btnPrev) s_btnDownAt = now;
+    if (!btn && !s_btnLongFired && now - s_btnDownAt > 1000) {
+      s_btnLongFired = true;
+      ui::openTouchTest();
+    }
+    if (btn && !s_btnPrev) {
+      if (!s_btnLongFired) backPressed = true;
+      s_btnLongFired = false;
+    }
     s_btnPrev = btn;
     ui::frame(touch::read(), backPressed);
   } else {

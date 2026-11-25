@@ -22,6 +22,7 @@ void delay(uint32_t);
 uint32_t esp_random();
 uint32_t analogReadMilliVolts(int);
 inline void pinMode(int, int) {}
+inline int digitalRead(int) { return 1; }
 #define ADC_11db 3
 inline void analogSetPinAttenuation(int, int) {}
 struct SerialShim { void printf(const char* f, ...) { va_list a; va_start(a, f); vfprintf(stderr, f, a); va_end(a);} void println(const char* s){fprintf(stderr,"%s\n",s);} void begin(int){} };

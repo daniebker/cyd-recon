@@ -13,6 +13,8 @@ void bootDone();
 void onNewDevice(int idx);
 // Device slot currently being tracked (-1 if none)
 int trackedIndex();
+// Touch diagnostics screen (also opened by holding BOOT for 1 s)
+void openTouchTest();
 // Render + handle input; call every loop
 void frame(const touch::State& t, bool backButton);
 

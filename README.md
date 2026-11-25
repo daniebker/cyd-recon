@@ -89,7 +89,7 @@ Or uncomment `upload_port` / `monitor_port` in `platformio.ini`.
 | Alert pop-up | Tap it to jump straight into tracking that device |
 | Tracker | GEIGER on/off, CH LOCK (WiFi), SET/CLEAR MARK, RESET PEAK |
 | Network | Tap a network to join (saved and open networks join instantly), HIDDEN / OTHER SSID, AUTO-JOIN. Once joined: RESCAN, DISCONNECT, FORGET NET, tap a device for details |
-| Anywhere | **BOOT** button or the `< BACK` button returns to the list |
+| Anywhere | Short press **BOOT** or `< BACK` to go back. **Hold BOOT for 1 s** to open the touch test screen, which shows the controller, I2C bus scan, raw and mapped coordinates and corner targets |
 
 ## Hunting tips
 

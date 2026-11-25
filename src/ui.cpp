@@ -19,7 +19,7 @@ namespace {
 
 LGFX_Sprite g;  // 480x320 frame buffer in PSRAM
 
-enum Screen : uint8_t { SCR_BOOT, SCR_LIST, SCR_DETAIL, SCR_SPECTRUM, SCR_NET, SCR_KEYB, SCR_HOST };
+enum Screen : uint8_t { SCR_BOOT, SCR_LIST, SCR_DETAIL, SCR_SPECTRUM, SCR_NET, SCR_KEYB, SCR_HOST, SCR_TOUCH };
 Screen s_screen = SCR_BOOT;
 Screen s_detailReturn = SCR_LIST;  // where BACK goes from the tracker
 
@@ -1364,6 +1364,75 @@ void keyboardTap(uint8_t id, int arg) {
   }
 }
 
+// ---------------- TOUCH TEST ----------------
+struct TrailPt {
+  int16_t x, y;
+};
+TrailPt s_trail[48];
+int s_trailN = 0, s_trailHead = 0;
+Screen s_touchReturn = SCR_LIST;
+
+void drawTouchTest(const touch::State& t) {
+  const touch::Diag& dg = touch::diag();
+  if (t.down) {
+    const TrailPt& last = s_trail[(s_trailHead + 47) % 48];
+    if (!s_trailN || abs(last.x - t.x) + abs(last.y - t.y) > 3) {
+      s_trail[s_trailHead] = {t.x, t.y};
+      s_trailHead = (s_trailHead + 1) % 48;
+      s_trailN = min(s_trailN + 1, 48);
+    }
+  }
+  neonText("TOUCH TEST", 8, 6, YELLOW, &fonts::Font2, textdatum_t::top_left, 1);
+  text("press BOOT to exit", 472, 10, DIM, &fonts::Font0, textdatum_t::top_right);
+  g.drawFastHLine(0, 28, SCREEN_W, YELLOW);
+
+  // Targets: corners + centre. If a tap lands far from the target you touch,
+  // the axis mapping is off.
+  const int tg[5][2] = {{20, 50}, {459, 50}, {20, 299}, {459, 299}, {240, 175}};
+  for (auto& p : tg) {
+    g.drawCircle(p[0], p[1], 12, MAGENTA);
+    g.drawFastHLine(p[0] - 16, p[1], 33, MAGENTA_DIM);
+    g.drawFastVLine(p[0], p[1] - 16, 33, MAGENTA_DIM);
+  }
+
+  // Diagnostics block
+  char buf[64];
+  int y = 40;
+  auto line = [&](const char* s, uint16_t c) {
+    text(s, 60, y, c, &fonts::Font0);
+    y += 12;
+  };
+  snprintf(buf, sizeof(buf), "chip    %s", touch::chipName());
+  line(buf, dg.chip ? GREEN : RED);
+  int p = snprintf(buf, sizeof(buf), "i2c bus");
+  for (int i = 0; i < dg.nFound && p < 60; i++) p += snprintf(buf + p, sizeof(buf) - p, " %02X", dg.i2cFound[i]);
+  if (!dg.nFound) snprintf(buf + p, sizeof(buf) - p, " (nothing found!)");
+  line(buf, dg.nFound ? TEXT : RED);
+  snprintf(buf, sizeof(buf), "status  0x%02X   res %ux%u", dg.status, dg.maxX, dg.maxY);
+  line(buf, TEXT);
+  snprintf(buf, sizeof(buf), "reads   %lu  errors %lu  touches %lu", (unsigned long)dg.reads, (unsigned long)dg.errors,
+           (unsigned long)dg.touches);
+  line(buf, dg.errors > dg.reads / 4 + 2 ? ORANGE : TEXT);
+  snprintf(buf, sizeof(buf), "info    0x%02X  INT pin %s", dg.lastInfo, digitalRead(PIN_TOUCH_INT) ? "high" : "LOW");
+  line(buf, TEXT);
+  snprintf(buf, sizeof(buf), "raw     %d, %d", dg.rawX, dg.rawY);
+  line(buf, CYAN);
+  snprintf(buf, sizeof(buf), "screen  %d, %d  %s", t.x, t.y, t.down ? "DOWN" : "up");
+  line(buf, t.down ? GREEN : DIM);
+
+  // Trail + crosshair
+  for (int i = 0; i < s_trailN; i++) {
+    const TrailPt& tp = s_trail[(s_trailHead - 1 - i + 48) % 48];
+    g.fillCircle(tp.x, tp.y, 2, lerp565(BG, CYAN, 1.f - (float)i / 48));
+  }
+  if (t.down) {
+    g.drawFastHLine(0, t.y, SCREEN_W, GREEN_DIM);
+    g.drawFastVLine(t.x, 30, SCREEN_H - 30, GREEN_DIM);
+    g.drawCircle(t.x, t.y, 14, GREEN);
+    g.drawCircle(t.x, t.y, 15, GREEN);
+  }
+}
+
 // ---------------- BOOT ----------------
 void drawBoot() {
   background();
@@ -1587,6 +1656,15 @@ void bootDone() {
   }
   s_screen = SCR_LIST;
   s_nextGlitch = millis() + 2500;
+  if (digitalRead(PIN_BOOT_BTN) == LOW) openTouchTest();
+}
+
+void openTouchTest() {
+  if (s_screen == SCR_TOUCH) return;
+  if (s_screen == SCR_DETAIL) closeDetail();
+  s_touchReturn = s_screen == SCR_BOOT ? SCR_LIST : s_screen;
+  s_screen = SCR_TOUCH;
+  s_trailN = 0;
 }
 
 int trackedIndex() { return s_screen == SCR_DETAIL ? s_sel : -1; }
@@ -1603,7 +1681,8 @@ void frame(const touch::State& t, bool backButton) {
   updateRates();
 
   if (backButton && s_screen != SCR_LIST) {
-    if (s_screen == SCR_DETAIL) closeDetail();
+    if (s_screen == SCR_TOUCH) s_screen = s_touchReturn;
+    else if (s_screen == SCR_DETAIL) closeDetail();
     else if (s_screen == SCR_HOST || s_screen == SCR_KEYB) s_screen = SCR_NET;
     else s_screen = SCR_LIST;
     led::setHeat(-1);
@@ -1626,7 +1705,8 @@ void frame(const touch::State& t, bool backButton) {
   }
 
   checkBatteryWarning();
-  handleTouch(t);
+  if (s_screen != SCR_TOUCH) handleTouch(t);
+  else s_wasDown = t.down;
   s_nhits = 0;
   background();
   switch (s_screen) {
@@ -1644,6 +1724,9 @@ void frame(const touch::State& t, bool backButton) {
       break;
     case SCR_HOST:
       drawHost();
+      break;
+    case SCR_TOUCH:
+      drawTouchTest(t);
       break;
     case SCR_SPECTRUM:
       drawSpectrum();

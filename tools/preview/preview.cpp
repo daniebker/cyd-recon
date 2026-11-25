@@ -21,6 +21,11 @@ static uint32_t g_batMv = 1960;  // ADC pin mV (cell = 2x)
 uint32_t analogReadMilliVolts(int) { return g_batMv; }
 
 namespace net { bool st_connected(); }
+namespace touch {
+static Diag dg;
+const Diag& diag() { return dg; }
+const char* chipName() { return "ST77922 TP @0x55"; }
+}
 // ---- stubs for hardware modules ----
 static const char* g_shot = nullptr;
 namespace display {
@@ -420,5 +425,33 @@ int main(int argc, char** argv) {
   tap(200, 136 + 28 * 2 + 5);  // a host row
   snprintf(p, sizeof p, "%s/14_host.ppm", out);
   shot(p);
+
+  // touch test screen
+  touch::dg.chip = touch::CHIP_ST_55;
+  uint8_t found[] = {0x18, 0x55};
+  memcpy(touch::dg.i2cFound, found, 2);
+  touch::dg.nFound = 2;
+  touch::dg.status = 0;
+  touch::dg.maxX = 320;
+  touch::dg.maxY = 480;
+  touch::dg.reads = 1234;
+  touch::dg.touches = 7;
+  touch::dg.rawX = 120;
+  touch::dg.rawY = 300;
+  ui::openTouchTest();
+  for (int i = 0; i < 30; i++) {
+    touch::State t;
+    t.down = true;
+    t.x = 280 + i * 4;
+    t.y = 120 + i * 2;
+    tick(1, t);
+  }
+  touch::State t;
+  t.down = true;
+  t.x = 400;
+  t.y = 180;
+  g_shot = p;
+  snprintf(p, sizeof p, "%s/15_touch_test.ppm", out);
+  tick(1, t);
   return 0;
 }
