@@ -1207,7 +1207,12 @@ void drawHost() {
   row("MAC", buf);
   const char* vend = signatures::ouiVendor(m);
   row("VENDOR", vend ? vend : (m[0] & 2) ? "private (randomised)" : "unknown", vend ? TEXT : DIM);
-  row("NAME", h && h->name[0] ? h->name : "-", CYAN);
+  if (h && h->name[0]) {
+    snprintf(buf, sizeof(buf), "%s  (%s)", h->name, net::nameSrcText(h->nameSrc));
+    row("NAME", buf, CYAN);
+  } else {
+    row("NAME", h && h->nameTries < 4 ? "looking up..." : "-", DIM);
+  }
   row("MDNS", h && h->services[0] ? h->services : "-");
   if (h) {
     char a1[8], a2[8];

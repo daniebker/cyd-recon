@@ -6,6 +6,7 @@
 #include "devices.h"
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
+#include "lwip/sockets.h"
 #include "lwip/tcpip.h"
 #include "ping/ping_sock.h"
 #include "radio.h"
@@ -131,6 +132,13 @@ void addHost(uint32_t ip, const uint8_t* mac) {
   const uint32_t now = millis();
   int i = findHost(ip);
   if (i >= 0) {
+    net::Host& h = s_hosts[i];
+    if (memcmp(h.mac, mac, 6) != 0) {  // IP now belongs to another device
+      h.name[0] = 0;
+      h.nameSrc = net::NAME_NONE;
+      h.nameTries = 0;
+      h.services[0] = 0;
+    }
     memcpy(s_hosts[i].mac, mac, 6);
     s_hosts[i].lastSeen = now;
     return;
@@ -270,13 +278,242 @@ void mdnsQuery(int which) {
     const int hi = findHost(ip);
     if (hi < 0) continue;
     net::Host& h = s_hosts[hi];
-    if (!h.name[0]) strlcpy(h.name, MDNS.hostname(i).c_str(), sizeof(h.name));
+    if (!h.name[0]) {
+      strlcpy(h.name, MDNS.hostname(i).c_str(), sizeof(h.name));
+      if (h.name[0]) h.nameSrc = net::NAME_MDNS;
+    }
     const char* tag = kServices[which][1];
     if (!strstr(h.services, tag) && strlen(h.services) + strlen(tag) + 2 < sizeof(h.services)) {
       if (h.services[0]) strlcat(h.services, " ", sizeof(h.services));
       strlcat(h.services, tag, sizeof(h.services));
     }
   }
+}
+
+// ---------------- per-host name lookup ----------------
+// Most LAN devices don't advertise any of the mDNS services we browse for, so
+// ask each host for its name directly, cheapest/most specific first:
+//   1. unicast mDNS reverse lookup sent straight to the host (Apple, Linux
+//      avahi, ESPHome, printers, Chromecasts...)
+//   2. reverse DNS via the network's resolver/router, which usually knows the
+//      DHCP hostname (dnsmasq, OpenWrt, Fritz!Box, Pi-hole, most ISP boxes)
+//   3. NetBIOS node status (Windows, Samba / NAS boxes)
+
+uint16_t s_qid = 0x4c00;
+
+// Send one UDP datagram to ip:port (network byte order ip) and wait for a reply
+// from that address carrying our DNS/NBNS transaction id. Returns reply length.
+int udpExchange(uint32_t ip, uint16_t port, const uint8_t* q, size_t qlen, uint8_t* resp, size_t cap, int timeoutMs) {
+  const int sock = lwip_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (sock < 0) return -1;
+  sockaddr_in to = {};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(port);
+  to.sin_addr.s_addr = ip;
+  int got = -1;
+  if (lwip_sendto(sock, q, qlen, 0, (sockaddr*)&to, sizeof(to)) == (int)qlen) {
+    const uint32_t deadline = millis() + timeoutMs;
+    for (;;) {
+      const int32_t left = (int32_t)(deadline - millis());
+      if (left <= 0) break;
+      timeval tv = {left / 1000, (left % 1000) * 1000};
+      lwip_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+      sockaddr_in from = {};
+      socklen_t fl = sizeof(from);
+      const int n = lwip_recvfrom(sock, resp, cap, 0, (sockaddr*)&from, &fl);
+      if (n < 0) break;  // timeout
+      if (n >= 12 && from.sin_addr.s_addr == ip && resp[0] == q[0] && resp[1] == q[1]) {
+        got = n;
+        break;
+      }
+    }
+  }
+  lwip_close(sock);
+  return got;
+}
+
+// Read a (possibly compressed) DNS name at off, advancing off past it.
+bool dnsName(const uint8_t* m, int len, int& off, char* out, size_t cap) {
+  size_t o = 0;
+  int p = off, jumps = 0;
+  bool jumped = false;
+  if (cap) out[0] = 0;
+  while (p < len) {
+    const uint8_t l = m[p];
+    if (l == 0) {
+      if (!jumped) off = p + 1;
+      return true;
+    }
+    if ((l & 0xC0) == 0xC0) {
+      if (p + 1 >= len || ++jumps > 16) return false;
+      if (!jumped) off = p + 2;
+      jumped = true;
+      p = ((l & 0x3F) << 8) | m[p + 1];
+      continue;
+    }
+    if (l > 63 || p + 1 + l > len) return false;
+    for (int i = 0; i < l; i++) {
+      if (o + 2 >= cap) break;
+      const char c = (char)m[p + 1 + i];
+      out[o++] = (c >= 0x20 && c < 0x7F) ? c : '?';
+    }
+    if (o + 2 < cap) out[o++] = '.';
+    out[o < cap ? o : cap - 1] = 0;
+    p += 1 + l;
+  }
+  return false;
+}
+
+// Build a PTR query for d.c.b.a.in-addr.arpa
+int buildPtrQuery(uint32_t ip, uint16_t id, uint8_t* q) {
+  int n = 0;
+  q[n++] = id >> 8;
+  q[n++] = id & 0xFF;
+  q[n++] = 0x01;  // RD (ignored by mDNS responders)
+  q[n++] = 0x00;
+  q[n++] = 0; q[n++] = 1;  // QDCOUNT
+  for (int i = 0; i < 6; i++) q[n++] = 0;
+  for (int i = 3; i >= 0; i--) {
+    char lab[4];
+    const int l = snprintf(lab, sizeof(lab), "%u", (unsigned)((ip >> (8 * i)) & 0xFF));
+    q[n++] = l;
+    memcpy(q + n, lab, l);
+    n += l;
+  }
+  q[n++] = 7; memcpy(q + n, "in-addr", 7); n += 7;
+  q[n++] = 4; memcpy(q + n, "arpa", 4); n += 4;
+  q[n++] = 0;
+  q[n++] = 0; q[n++] = 12;  // PTR
+  q[n++] = 0; q[n++] = 1;   // IN
+  return n;
+}
+
+// First PTR target in a DNS/mDNS response
+bool parsePtr(const uint8_t* m, int len, char* out, size_t cap) {
+  if (len < 12 || !(m[2] & 0x80) || (m[3] & 0x0F) != 0) return false;  // not a response / error rcode
+  const int qd = (m[4] << 8) | m[5], an = (m[6] << 8) | m[7];
+  int off = 12;
+  char tmp[96];
+  for (int i = 0; i < qd; i++) {
+    if (!dnsName(m, len, off, tmp, sizeof(tmp))) return false;
+    off += 4;
+  }
+  for (int i = 0; i < an && off < len; i++) {
+    if (!dnsName(m, len, off, tmp, sizeof(tmp)) || off + 10 > len) return false;
+    const uint16_t type = (m[off] << 8) | m[off + 1];
+    const uint16_t rdlen = (m[off + 8] << 8) | m[off + 9];
+    off += 10;
+    if (off + rdlen > len) return false;
+    if (type == 12) {
+      int r = off;
+      return dnsName(m, len, r, out, cap) && out[0];
+    }
+    off += rdlen;
+  }
+  return false;
+}
+
+// Reduce "Daniels-iPhone.lan." to "Daniels-iPhone"; reject names that are just
+// the address spelled out (e.g. "192-168-1-23.isp.example").
+bool cleanName(char* n, uint32_t ip) {
+  char* dot = strchr(n, '.');
+  if (dot) *dot = 0;
+  if (!n[0] || strcasecmp(n, "localhost") == 0) return false;
+  bool letter = false;
+  for (const char* c = n; *c; c++)
+    if (isalpha((unsigned char)*c)) letter = true;
+  if (!letter) return false;
+  const uint8_t* b = (const uint8_t*)&ip;
+  char a1[20], a2[20];
+  snprintf(a1, sizeof(a1), "%u-%u-%u-%u", b[0], b[1], b[2], b[3]);
+  snprintf(a2, sizeof(a2), "%u-%u-%u-%u", b[3], b[2], b[1], b[0]);
+  return !strstr(n, a1) && !strstr(n, a2);
+}
+
+bool ptrLookup(uint32_t server, uint16_t port, uint32_t ip, char* out, size_t cap, int timeoutMs) {
+  static uint8_t q[64], r[512];
+  const int qn = buildPtrQuery(ip, ++s_qid, q);
+  const int n = udpExchange(server, port, q, qn, r, sizeof(r), timeoutMs);
+  return n > 0 && parsePtr(r, n, out, cap) && cleanName(out, ip);
+}
+
+bool netbiosLookup(uint32_t ip, char* out, size_t cap) {
+  static uint8_t q[50], r[512];
+  int n = 0;
+  const uint16_t id = ++s_qid;
+  q[n++] = id >> 8;
+  q[n++] = id & 0xFF;
+  q[n++] = 0; q[n++] = 0;  // flags
+  q[n++] = 0; q[n++] = 1;  // QDCOUNT
+  for (int i = 0; i < 6; i++) q[n++] = 0;
+  q[n++] = 0x20;  // "*" padded with NULs, first-level encoded
+  q[n++] = 'C';
+  q[n++] = 'K';
+  for (int i = 0; i < 30; i++) q[n++] = 'A';
+  q[n++] = 0;
+  q[n++] = 0; q[n++] = 0x21;  // NBSTAT
+  q[n++] = 0; q[n++] = 0x01;  // IN
+  const int len = udpExchange(ip, 137, q, n, r, sizeof(r), 400);
+  if (len < 12 || !(r[2] & 0x80) || ((r[6] << 8) | r[7]) == 0) return false;
+  int off = 12;
+  char tmp[64];
+  if (!dnsName(r, len, off, tmp, sizeof(tmp)) || off + 11 > len) return false;
+  off += 10;  // type, class, ttl, rdlength
+  const int num = r[off++];
+  int pick = -1;
+  for (int i = 0; i < num && off + (i + 1) * 18 <= len; i++) {
+    const uint8_t* e = r + off + i * 18;
+    const bool group = e[16] & 0x80;
+    if (group) continue;
+    if (e[15] == 0x00) { pick = i; break; }      // workstation name
+    if (e[15] == 0x20 && pick < 0) pick = i;     // file server name
+  }
+  if (pick < 0) return false;
+  const uint8_t* e = r + off + pick * 18;
+  int l = 15;
+  while (l > 0 && (e[l - 1] == ' ' || e[l - 1] == 0)) l--;
+  size_t o = 0;
+  for (int i = 0; i < l && o + 1 < cap; i++) out[o++] = (e[i] >= 0x20 && e[i] < 0x7F) ? e[i] : '?';
+  out[o] = 0;
+  return o > 0;
+}
+
+// Resolve one unnamed host. Returns true if a lookup was attempted.
+bool resolveNextName() {
+  const uint32_t now = millis();
+  int best = -1;
+  for (int i = 0; i < net::MAX_HOSTS; i++) {
+    const net::Host& h = s_hosts[i];
+    if (!h.used || h.nameSrc != net::NAME_NONE || h.ip == s_info.ip || h.nameTries >= 4) continue;
+    // back off: retry after 1, 2, 3 minutes (names appear as DHCP leases renew, devices wake...)
+    if (h.nameTries && now - h.nameAt < 60000u * h.nameTries) continue;
+    if (best < 0 || h.nameTries < s_hosts[best].nameTries) best = i;
+  }
+  if (best < 0) return false;
+  net::Host& h = s_hosts[best];
+  const uint32_t ip = h.ip, epoch = s_epoch;
+  h.nameAt = now;
+  char name[64];
+  uint8_t src = net::NAME_NONE;
+  if (ptrLookup(ip, 5353, ip, name, sizeof(name), 400)) {
+    src = net::NAME_MDNS;
+  } else {
+    const uint32_t dns = s_info.dns ? s_info.dns : s_info.gateway;
+    if (dns && ptrLookup(dns, 53, ip, name, sizeof(name), 700)) src = net::NAME_DNS;
+    else if (s_info.gateway && s_info.gateway != dns && ptrLookup(s_info.gateway, 53, ip, name, sizeof(name), 700))
+      src = net::NAME_DNS;
+    else if (netbiosLookup(ip, name, sizeof(name))) src = net::NAME_NETBIOS;
+  }
+  if (epoch != s_epoch || !h.used || h.ip != ip) return true;  // network or slot changed under us
+  if (src != net::NAME_NONE && !h.name[0]) {
+    strlcpy(h.name, name, sizeof(h.name));
+    h.nameSrc = src;
+    Serial.printf("[net] name %u.%u.%u.%u = %s (%s)\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24,
+                  h.name, net::nameSrcText(src));
+  } else if (src == net::NAME_NONE) {
+    h.nameTries++;
+  }
+  return true;
 }
 
 // ---------------- discovery task ----------------
@@ -300,6 +537,11 @@ void discoveryTask(void*) {
       lastPing = 0;
       lastMdns = millis();
       addHost(s_info.ip, s_info.mac);
+      const int self = findHost(s_info.ip);
+      if (self >= 0) {
+        strlcpy(s_hosts[self].name, "cyd-recon", sizeof(s_hosts[self].name));
+        s_hosts[self].nameSrc = net::NAME_SELF;
+      }
     }
     const uint32_t now = millis();
 
@@ -341,6 +583,7 @@ void discoveryTask(void*) {
       lastPing = now;
       startPing();
     }
+    resolveNextName();  // one host per pass, ~0.4-2 s
     if (s_mdnsUp && now - lastMdns > 1500) {
       lastMdns = now;
       mdnsQuery(mdnsNext);  // blocks ~3 s
@@ -523,6 +766,16 @@ void probePorts(int idx) {
   if (idx >= 0 && idx < MAX_HOSTS && s_hosts[idx].used) {
     s_hosts[idx].portScan = 1;
     s_portReq = idx;
+  }
+}
+
+const char* nameSrcText(uint8_t src) {
+  switch (src) {
+    case NAME_SELF: return "this device";
+    case NAME_MDNS: return "mdns";
+    case NAME_DNS: return "dns";
+    case NAME_NETBIOS: return "netbios";
+    default: return "";
   }
 }
 

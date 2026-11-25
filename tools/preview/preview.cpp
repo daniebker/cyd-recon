@@ -130,6 +130,8 @@ void finishConnect() {
     sscanf(x.mac, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
     for (int i = 0; i < 6; i++) h.mac[i] = v[i];
     strcpy(h.name, x.name);
+    h.nameSrc = !x.name[0] ? NAME_NONE : x.last == 42 ? NAME_SELF : x.last == 23 || x.last == 31 ? NAME_MDNS : NAME_DNS;
+    h.nameTries = x.name[0] ? 0 : 4;
     strcpy(h.services, x.svc);
     h.firstSeen = millis() - 600000;
     h.lastSeen = millis() - (n * 3000);
@@ -155,6 +157,9 @@ int hostCount() { return MAX_HOSTS; }
 const Host& host(int i) { return hosts[i]; }
 void rescan() {}
 int sweepProgress() { return 100; }
+const char* nameSrcText(uint8_t s) {
+  return s == NAME_SELF ? "this device" : s == NAME_MDNS ? "mdns" : s == NAME_DNS ? "dns" : s == NAME_NETBIOS ? "netbios" : "";
+}
 void probePorts(int) {}
 const char* portName(uint16_t p) { return p == 22 ? "ssh" : p == 80 ? "http" : p == 443 ? "https" : p == 445 ? "smb" : "upnp"; }
 void ipToStr(uint32_t ip, char* out) {

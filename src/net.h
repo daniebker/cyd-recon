@@ -1,6 +1,7 @@
 // WiFi station mode: join a network, then map the LAN.
 //  * credentials for up to 6 networks saved in NVS
 //  * ARP sweep of the local /24 to find hosts, mDNS for names/services
+//  * per-host name lookup: unicast mDNS reverse, router reverse DNS, NetBIOS
 //  * gateway ping, on-demand TCP port probe of a host
 // While connected the sniffer is pinned to the AP's channel.
 #pragma once
@@ -24,12 +25,18 @@ struct Info {
 constexpr int MAX_HOSTS = 64;
 constexpr int MAX_PORTS = 12;
 
+// Where a host's name came from
+enum NameSrc : uint8_t { NAME_NONE = 0, NAME_SELF, NAME_MDNS, NAME_DNS, NAME_NETBIOS };
+
 struct Host {
   bool used;
   uint32_t ip;  // network byte order
   uint8_t mac[6];
   uint32_t firstSeen, lastSeen;
-  char name[32];       // mDNS hostname
+  char name[32];       // device name (see nameSrc), "" if unknown
+  uint8_t nameSrc;     // NameSrc
+  uint8_t nameTries;   // lookups attempted with no answer
+  uint32_t nameAt;     // millis() of the last lookup attempt
   char services[48];   // mDNS service tags, e.g. "http airplay"
   uint16_t ports[MAX_PORTS];
   uint8_t nPorts;
@@ -58,6 +65,7 @@ void rescan();
 int sweepProgress();   // 0..100, 100 = idle
 void probePorts(int hostIdx);
 const char* portName(uint16_t port);
+const char* nameSrcText(uint8_t src);  // "mdns", "dns", "netbios", ...
 
 void ipToStr(uint32_t ip, char* out);  // out >= 16
 
