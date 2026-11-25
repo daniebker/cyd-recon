@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+*.bin
+!release/*.bin
+tools/preview/build/
+tools/preview/out/
